@@ -1,0 +1,57 @@
+[project]
+name = "rotation-captcha"
+version = "0.1.0"
+description = "Research project on solving rotation captcha (rotation angle estimation)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pillow>=10.0",
+    "numpy>=1.24",
+    "requests>=2.31",
+    "tqdm>=4.66",
+    "datasets>=2.19",
+    "huggingface-hub>=0.23",
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "accelerate>=1.0",
+    "transformers>=4.44",
+]
+
+[build-system]
+requires = ["uv_build>=0.10.0,<0.11.0"]
+build-backend = "uv_build"
+
+# Package dir is src/rotcaptcha/, which doesn't match the normalized project name
+# (rotation_captcha), so point the build backend at it explicitly.
+[tool.uv.build-backend]
+module-name = "rotcaptcha"
+
+# torch and torchvision pinned to the same CUDA index. Leaving torchvision on PyPI
+# would drag in its own CPU-only torch, silently replacing the +cu128 build and
+# moving every search onto the CPU without failing anywhere visible.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+torchvision = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+    "pytest>=9.1.1",
+    "ruff>=0.15.22",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "PTH", "N"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
