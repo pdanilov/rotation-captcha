@@ -217,6 +217,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Project data: regenerated via scripts/ (raw COCO crop cache + the HF export)
-/data/raw/coco_objects/
+# Project data: regenerated via scripts/ (raw COCO crop cache and Captcha + the HF export)
+/data/raw/
 /data/hf/
