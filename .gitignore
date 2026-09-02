@@ -220,3 +220,6 @@ __marimo__/
 # Project data: regenerated via scripts/ (raw COCO crop cache and Captcha + the HF export)
 /data/raw/
 /data/hf/
+
+# Training outputs (checkpoints, logs)
+/runs/

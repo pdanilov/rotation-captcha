@@ -16,7 +16,11 @@ dependencies = [
     "accelerate>=1.0",
     "transformers>=4.44",
     "kaggle>=2.2.4",
+    "tyro>=0.8",
 ]
+
+[project.scripts]
+rotcaptcha = "rotcaptcha.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.10.0,<0.11.0"]
@@ -53,6 +57,8 @@ extend-exclude = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "PTH", "N"]
+# `import torch.nn.functional as F` is the universal PyTorch idiom.
+ignore = ["N812"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
