@@ -5,10 +5,10 @@ column + extra metadata), loadable directly with:
 
     load_dataset("imagefolder", data_dir="data/hf/<name>")
 
-Produced datasets:
-  data/hf/coco_objects/{train,validation}/   metadata: file_name, image_id, category
-  data/hf/real_caps_labeled/test/            metadata: file_name, angle_cw
-  data/hf/real_caps_unlabeled/train/         metadata: file_name
+Produced datasets (hf/ mirrors the raw/ layout):
+  data/hf/coco_objects/{train,validation}/            metadata: file_name, image_id, category
+  data/hf/captcha/baidu/labeled_caps/test/                 metadata: file_name, angle_cw
+  data/hf/captcha/baidu/unlabeled_caps/{train,validation}/ metadata: file_name
 
 The COCO train/val split is grouped by source `image_id` (all crops from one photo
 go to the same split) to prevent scene/background leakage — which is exactly why
@@ -32,9 +32,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CROPS = ROOT / "data" / "raw" / "coco_objects"
 CROP_MANIFEST = CROPS / "manifest.csv"
-REAL = ROOT / "data" / "raw" / "real_caps_labeled"
+REAL = ROOT / "data" / "raw" / "captcha" / "baidu" / "labeled_caps"
 REAL_CSV = REAL / "labels.csv"
-REAL_UNL = ROOT / "data" / "raw" / "real_caps_unlabeled"
+REAL_UNL = ROOT / "data" / "raw" / "captcha" / "baidu" / "unlabeled_caps"
 HF = ROOT / "data" / "hf"
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -110,18 +110,25 @@ def build_real_labeled() -> None:
             {"src": REAL / r["filename"], "file_name": r["filename"], "angle_cw": r["angle_cw"]}
             for r in csv.DictReader(f)
         ]
-    write_split(HF / "real_caps_labeled" / "test", rows, ["file_name", "angle_cw"])
-    print(f"real_caps_labeled: test={len(rows)}")
+    write_split(HF / "captcha" / "baidu" / "labeled_caps" / "test", rows, ["file_name", "angle_cw"])
+    print(f"captcha/baidu/labeled_caps: test={len(rows)}")
 
 
-def build_real_unlabeled() -> None:
+def build_real_unlabeled(val_frac: float, seed: int) -> None:
     imgs = sorted(p for p in REAL_UNL.glob("*") if p.suffix.lower() in IMG_EXTS)
     if not imgs:
-        print("real_caps_unlabeled: none found, skipping")
+        print("captcha/baidu/unlabeled_caps: none found, skipping")
         return
-    rows = [{"src": p, "file_name": p.name} for p in imgs]
-    write_split(HF / "real_caps_unlabeled" / "train", rows, ["file_name"])
-    print(f"real_caps_unlabeled: train={len(rows)}")
+    # Held-out unlabeled val for the label-free equivariance metric (never touches
+    # the labeled test set). Random split — the pool is already pHash-deduped.
+    rng = random.Random(seed)
+    rng.shuffle(imgs)
+    n_val = max(1, int(len(imgs) * val_frac))
+    splits = {"validation": imgs[:n_val], "train": imgs[n_val:]}
+    for split, ps in splits.items():
+        rows = [{"src": p, "file_name": p.name} for p in ps]
+        write_split(HF / "captcha" / "baidu" / "unlabeled_caps" / split, rows, ["file_name"])
+    print(f"captcha/baidu/unlabeled_caps: train={len(splits['train'])} val={len(splits['validation'])}")
 
 
 def main() -> None:
@@ -135,10 +142,10 @@ def main() -> None:
 
     build_coco(args.val_frac, args.seed, group_by_image=not args.crop_level_split)
     build_real_labeled()
-    build_real_unlabeled()
+    build_real_unlabeled(args.val_frac, args.seed)
     print(f"\nHF datasets under {HF}/ . Load e.g.:")
     print('  load_dataset("imagefolder", data_dir="data/hf/coco_objects")')
-    print('  load_dataset("imagefolder", data_dir="data/hf/real_caps_labeled")')
+    print('  load_dataset("imagefolder", data_dir="data/hf/captcha/baidu/labeled_caps")')
 
 
 if __name__ == "__main__":
