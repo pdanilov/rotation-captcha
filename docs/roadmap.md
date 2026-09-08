@@ -35,9 +35,12 @@ Train one plain model on synthetic, test on real, no domain adaptation.
 
 - Backbone: a pretrained CNN (default `microsoft/resnet-34`), from the
   `transformers` model hub, swappable later. Pretrained weights are mandatory.
-- Head: **angular-bin classification** — N bins over [0, 360) (default 360 = 1°),
-  trained with a **Circular Smooth Label** (CSL) target: a wrapped-Gaussian soft
-  label around the true bin (circular label smoothing) instead of one-hot.
+- Head: **angular-bin classification** — N bins over [0, 360), trained with a
+  **Circular Smooth Label** (CSL) target: a wrapped-Gaussian soft label around the
+  true bin (circular label smoothing) instead of one-hot. **Bin-count sweep (done):
+  72 bins (5°) beat both 360 (1°, too fine to transfer) and 36 (10°, too coarse) on
+  real-test — real acc@10 0.34 vs 0.29/0.29, median 29° vs 44°/38°. 72 is the
+  default.**
   Decode with a circular soft-argmax (probability-weighted mean on the circle),
   which is seam-safe and gives sub-bin resolution.
 - Why not regression: direct (sin, cos) regression **does not train from scratch**
@@ -58,8 +61,8 @@ lever to add *one at a time*, re-measuring against Phase 0.
 
 - **Output-representation ablation** — swap the head away from the classification
   baseline: (sin, cos) regression (survey's other top performer, but see Phase 0 —
-  needs a warm start), von Mises (μ, κ) for uncertainty, phase-shifting coder, and a
-  bin-count sweep (360 vs 720). Compare on the metric set.
+  needs a warm start), von Mises (μ, κ) for uncertainty, phase-shifting coder.
+  (Bin-count sweep done in Phase 0: 72 bins wins.)
 - **Input-side domain match** — make synthetic discs *look* like real caps, applied
   in the fixed captcha frame after rotation so the angle label stays clean:
   replicate the real disc/ring geometry, histogram-match color, match the JPEG +

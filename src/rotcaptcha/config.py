@@ -22,10 +22,11 @@ class TrainConfig:
 
     # task head
     task: Task = "classification"
-    n_bins: int = 360
-    """Classification only: number of angular bins over [0, 360)."""
-    csl_sigma_bins: float = 2.0
-    """Classification only: CSL label-smoothing width, in bins (~degrees at n_bins=360)."""
+    n_bins: int = 72
+    """Classification only: number of angular bins over [0, 360). 72 (5 deg/bin) beat
+    both 360 (too fine to transfer) and 36 (too coarse) on real-test — see roadmap."""
+    csl_sigma_bins: float = 1.0
+    """Classification only: CSL label-smoothing width, in bins (~5 deg at n_bins=72)."""
 
     # domain augmentation (training synthetic set only; eval is never augmented)
     augment: bool = True
@@ -59,7 +60,7 @@ class TrainConfig:
 
 
 CONFIGS: dict[str, tuple[str, TrainConfig]] = {
-    "default": ("ResNet-34, 360-bin CSL classification + augmentation, 40 epochs", TrainConfig()),
+    "default": ("ResNet-34, 72-bin CSL classification + augmentation, 40 epochs", TrainConfig()),
     "noaug": ("default without domain augmentation (Phase-0 A/B baseline)", TrainConfig(augment=False)),
     "eqv": (
         "default + warm-started, small-lambda equivariance on unlabeled real caps",
