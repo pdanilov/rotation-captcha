@@ -6,27 +6,34 @@ real captchas for domain adaptation (see docs/roadmap.md). Evaluates on the
 synthetic validation split, the real Baidu labeled captchas, and — when equivariance
 is on — a label-free equivariance metric on the held-out unlabeled real val split.
 
-    rotcaptcha default                       # 360-bin CSL classification + augmentation
-    rotcaptcha eqv                           # + equivariance on unlabeled real caps
-    rotcaptcha regression                    # (sin, cos) regression
-    rotcaptcha smoke                         # tiny sanity run
-    rotcaptcha default --epochs 80 --lr 1e-4 # override any field
+    rotcaptcha default                        # 72-bin CSL classification + augmentation
+    rotcaptcha pseudo                         # + R-gated self-training on unlabeled real
+    rotcaptcha regression                     # (sin, cos) regression
+    rotcaptcha smoke                          # tiny sanity run
+    rotcaptcha default --epochs 80 --lr 1e-4  # override any field
+    rotcaptcha pseudo --note "..." --tags a b # tracker metadata
+
+Each run logs to trackio (project "rotation-captcha") and saves its checkpoint under
+runs/<config-slug>__<coolname>/model.pt. View runs with `trackio show`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import random
 from itertools import cycle
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import trackio
 import tyro
 from accelerate import Accelerator
+from coolname import generate_slug
 from torch.utils.data import DataLoader
 
 from .augment import build_eval_transform, build_train_transform
-from .config import CONFIGS, TrainConfig
+from .config import CONFIGS, TrainConfig, config_slug
 from .data import (
     PseudoLabeledDataset,
     RealCaptchaDataset,
@@ -125,6 +132,23 @@ def train(cfg: TrainConfig) -> None:
     accelerator = Accelerator(mixed_precision="bf16")
     use_eq = cfg.lambda_eq > 0
 
+    # unique, human-readable run name: config slug + random coolname suffix
+    run_name = f"{config_slug(cfg)}__{generate_slug(2)}"
+    run_dir = cfg.out_dir / run_name
+    ckpt_path = run_dir / "model.pt"
+    if accelerator.is_main_process:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        tracker_cfg = dataclasses.asdict(cfg)
+        tracker_cfg["out_dir"] = str(cfg.out_dir)
+        tracker_cfg["tags"] = list(cfg.tags)
+        tracker_cfg |= {"run_name": run_name, "checkpoint": str(ckpt_path)}
+        trackio.init(
+            project="rotation-captcha",
+            name=run_name,
+            group=cfg.tags[0] if cfg.tags else None,
+            config=tracker_cfg,
+        )
+
     head = cfg.build_head()
     eval_tf = build_eval_transform(cfg.img_size)
     train_tf = build_train_transform(cfg.img_size, cfg.augment_strength) if cfg.augment else eval_tf
@@ -203,6 +227,7 @@ def train(cfg: TrainConfig) -> None:
 
         syn = evaluate(model, syn_val_loader, head, accelerator)
         real = evaluate(model, real_loader, head, accelerator)
+        eq = evaluate_equivariance(model, eq_val_loader, head, accelerator) if use_eq else None
         if accelerator.is_main_process:
             notes = ""
             if use_eq:
@@ -214,21 +239,25 @@ def train(cfg: TrainConfig) -> None:
             print(f"[epoch {epoch:02d}] loss={running / max(1, seen):.4f}{notes}")
             print(f"           synthetic-val | {format_metrics(syn)}")
             print(f"           real-test     | {format_metrics(real)}")
-        if use_eq:
-            eq = evaluate_equivariance(model, eq_val_loader, head, accelerator)
-            if accelerator.is_main_process:
+            if eq is not None:
                 print(f"           unlabeled-eq  | eq_MAE={eq['eq_mae']:.2f} eq_median={eq['eq_median']:.2f}")
+
+            logm = {"train/loss": running / max(1, seen)}
+            if eq_active:
+                logm["train/eq_loss"] = running_eq / max(1, seen)
+            if pseudo_active:
+                logm["train/pseudo_loss"] = running_pseudo / max(1, seen)
+            logm |= {f"syn/{k}": v for k, v in syn.items() if k != "n"}
+            logm |= {f"real/{k}": v for k, v in real.items() if k != "n"}
+            if eq is not None:
+                logm |= {"eq/mae": eq["eq_mae"], "eq/median": eq["eq_median"]}
+            trackio.log(logm, step=epoch)
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        cfg.out_dir.mkdir(parents=True, exist_ok=True)
-        aug = "aug" if cfg.augment else "noaug"
-        tag = f"{cfg.task}_{cfg.n_bins}b_{aug}"
-        tag += f"_eq{cfg.lambda_eq:g}" if use_eq else ""
-        tag += f"_pseudo{cfg.lambda_pseudo:g}" if use_pseudo else ""
-        ckpt = cfg.out_dir / f"{tag}_{cfg.model_name.replace('/', '_')}.pt"
-        torch.save(accelerator.unwrap_model(model).state_dict(), ckpt)
-        print(f"\nsaved checkpoint -> {ckpt}")
+        torch.save(accelerator.unwrap_model(model).state_dict(), ckpt_path)
+        print(f"\nsaved checkpoint -> {ckpt_path}")
+        trackio.finish()
 
 
 def main() -> None:

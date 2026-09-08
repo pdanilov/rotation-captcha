@@ -17,6 +17,8 @@ dependencies = [
     "transformers>=4.44",
     "kaggle>=2.2.4",
     "tyro>=0.8",
+    "trackio>=0.37.1",
+    "coolname>=5.0.0",
 ]
 
 [project.scripts]

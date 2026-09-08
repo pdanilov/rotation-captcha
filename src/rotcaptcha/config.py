@@ -60,15 +60,33 @@ class TrainConfig:
     num_workers: int = 8
     seed: int = 0
 
+    # run metadata (not hyperparameters; logged to the tracker, ignored by training)
+    note: str = ""
+    """Free-text 'what is this experiment about', logged to the tracker."""
+    tags: tuple[str, ...] = ()
+    """Short labels for filtering/grouping in the tracker (first tag -> trackio group)."""
+
     # bookkeeping
     max_train_batches: int = 0
     """Cap batches per epoch for a smoke test (0 = full epoch)."""
-    out_dir: Path = ROOT / "runs" / "phase0"
+    out_dir: Path = ROOT / "runs"
 
     def build_head(self) -> AngleHead:
         if self.task == "classification":
             return ClassificationHead(self.n_bins, self.csl_sigma_bins)
         return RegressionHead()
+
+
+def config_slug(cfg: TrainConfig) -> str:
+    """Short human-readable stem describing the config (hyperparameters only, no
+    metadata). Combined with a random coolname suffix for a collision-free run name."""
+    parts = ["cls", f"{cfg.n_bins}b"] if cfg.task == "classification" else ["reg"]
+    parts.append("aug" if cfg.augment else "noaug")
+    if cfg.lambda_eq > 0:
+        parts.append(f"eq{cfg.lambda_eq:g}")
+    if cfg.lambda_pseudo > 0:
+        parts.append(f"pseudo{cfg.pseudo_conf_frac:g}")
+    return "-".join(parts)
 
 
 CONFIGS: dict[str, tuple[str, TrainConfig]] = {
