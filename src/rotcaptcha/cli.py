@@ -130,6 +130,7 @@ def train(cfg: TrainConfig) -> None:
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
+        eq_active = use_eq and epoch > cfg.eq_warmup_epochs
         running, running_eq, seen = 0.0, 0.0, 0
         for step, batch in enumerate(train_loader):
             if cfg.max_train_batches and step >= cfg.max_train_batches:
@@ -137,7 +138,7 @@ def train(cfg: TrainConfig) -> None:
             outputs = model(batch["pixel_values"]).logits
             loss = head.loss(outputs, batch["target"])
             l_eq = torch.zeros((), device=loss.device)
-            if use_eq:
+            if eq_active:
                 l_eq = equivariance_loss(model, head, next(eq_iter))
                 loss = loss + cfg.lambda_eq * l_eq
             accelerator.backward(loss)
@@ -151,7 +152,9 @@ def train(cfg: TrainConfig) -> None:
         syn = evaluate(model, syn_val_loader, head, accelerator)
         real = evaluate(model, real_loader, head, accelerator)
         if accelerator.is_main_process:
-            eq_note = f" eq_loss={running_eq / max(1, seen):.4f}" if use_eq else ""
+            eq_note = ""
+            if use_eq:
+                eq_note = " eq_loss=warmup" if not eq_active else f" eq_loss={running_eq / max(1, seen):.4f}"
             print(f"[epoch {epoch:02d}] loss={running / max(1, seen):.4f}{eq_note}")
             print(f"           synthetic-val | {format_metrics(syn)}")
             print(f"           real-test     | {format_metrics(real)}")

@@ -35,6 +35,9 @@ class TrainConfig:
     # equivariance domain adaptation on unlabeled real caps (0 = off)
     lambda_eq: float = 0.0
     """Weight of the label-free equivariance loss L_eq added to L_abs."""
+    eq_warmup_epochs: int = 0
+    """Epochs of synthetic-only (L_abs) before enabling L_eq, to build a solid
+    absolute anchor before equivariance can drift the real-domain frame."""
 
     # optimization
     epochs: int = 40
@@ -59,8 +62,8 @@ CONFIGS: dict[str, tuple[str, TrainConfig]] = {
     "default": ("ResNet-34, 360-bin CSL classification + augmentation, 40 epochs", TrainConfig()),
     "noaug": ("default without domain augmentation (Phase-0 A/B baseline)", TrainConfig(augment=False)),
     "eqv": (
-        "default + equivariance domain adaptation on unlabeled real caps",
-        TrainConfig(lambda_eq=1.0),
+        "default + warm-started, small-lambda equivariance on unlabeled real caps",
+        TrainConfig(lambda_eq=0.05, eq_warmup_epochs=20),
     ),
     "regression": ("ResNet-34, (sin, cos) regression, 40 epochs", TrainConfig(task="regression")),
     "smoke": (
