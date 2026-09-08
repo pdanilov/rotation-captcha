@@ -131,3 +131,46 @@ class UnlabeledPairDataset(Dataset):
             "v2": self.tf(v2),
             "delta": (r2 - r1) % 360.0,
         }
+
+
+class UnlabeledRealDataset(Dataset):
+    """Unlabeled real caps as-is; yields the image + its index (for the pseudo-label
+    inference pass — the index lets us map predictions back to specific caps)."""
+
+    def __init__(self, split: str, transform: Transform):
+        data_dir = str(HF / "captcha" / "baidu" / "unlabeled_caps")
+        self.ds = load_dataset("imagefolder", data_dir=data_dir, split=split)
+        self.tf = transform
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx: int) -> dict:
+        img: Image.Image = self.ds[idx]["image"].convert("RGB")
+        return {"pixel_values": self.tf(img), "idx": idx}
+
+
+class PseudoLabeledDataset(Dataset):
+    """Confident real caps with model-assigned pseudo angles (a self-training subset).
+
+    Holds a mutable list of (dataset_index, pseudo_angle) set by `set_items` after
+    each relabeling pass; trains on them with L_abs exactly like real labels.
+    """
+
+    def __init__(self, split: str, head: AngleHead, transform: Transform):
+        data_dir = str(HF / "captcha" / "baidu" / "unlabeled_caps")
+        self.ds = load_dataset("imagefolder", data_dir=data_dir, split=split)
+        self.head = head
+        self.tf = transform
+        self.items: list[tuple[int, float]] = []
+
+    def set_items(self, items: list[tuple[int, float]]) -> None:
+        self.items = items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, i: int) -> dict:
+        idx, angle = self.items[i]
+        img: Image.Image = self.ds[idx]["image"].convert("RGB")
+        return {"pixel_values": self.tf(img), "target": self.head.make_target(angle)}

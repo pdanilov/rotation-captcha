@@ -27,7 +27,13 @@ from torch.utils.data import DataLoader
 
 from .augment import build_eval_transform, build_train_transform
 from .config import CONFIGS, TrainConfig
-from .data import RealCaptchaDataset, SyntheticRotationDataset, UnlabeledPairDataset
+from .data import (
+    PseudoLabeledDataset,
+    RealCaptchaDataset,
+    SyntheticRotationDataset,
+    UnlabeledPairDataset,
+    UnlabeledRealDataset,
+)
 from .heads import AngleHead, rotate_vec
 from .metrics import angle_metrics, circular_abs_error, format_metrics
 from .model import build_model
@@ -50,6 +56,29 @@ def equivariance_loss(model, head: AngleHead, pair: dict) -> torch.Tensor:
     u2 = F.normalize(head.orientation_vec(model(pair["v2"]).logits), dim=-1)
     delta_rad = torch.deg2rad(pair["delta"].float())
     return F.mse_loss(u2, rotate_vec(u1, delta_rad))
+
+
+@torch.no_grad()
+def compute_pseudo_labels(model, loader, head: AngleHead, accelerator: Accelerator, frac: float):
+    """Predict angles for every unlabeled cap, keep the top `frac` by resultant-length
+    R (confidence). Returns [(dataset_index, pseudo_angle)] and the kept subset's mean R."""
+    model.eval()
+    all_logits, all_idx = [], []
+    for batch in loader:
+        logits = model(batch["pixel_values"]).logits
+        logits, idx = accelerator.gather_for_metrics((logits, batch["idx"]))
+        all_logits.append(logits.float().cpu())
+        all_idx.append(idx.cpu())
+    model.train()
+    logits = torch.cat(all_logits)
+    idx = torch.cat(all_idx).numpy()
+    r = head.orientation_vec(logits).norm(dim=-1).numpy()  # circular concentration = confidence
+    ang = head.decode(logits)
+    order = np.argsort(-r)
+    k = max(1, int(len(order) * frac))
+    sel = order[:k]
+    items = [(int(idx[i]), float(ang[i])) for i in sel]
+    return items, float(r[sel].mean())
 
 
 @torch.no_grad()
@@ -128,10 +157,27 @@ def train(cfg: TrainConfig) -> None:
         eq_train_loader, eq_val_loader = accelerator.prepare(eq_train_loader, eq_val_loader)
         eq_iter = cycle(eq_train_loader)
 
+    use_pseudo = cfg.lambda_pseudo > 0
+    label_loader = pseudo_ds = pseudo_iter = None
+    if use_pseudo:
+        label_ds = UnlabeledRealDataset("train", eval_tf)  # clean pass for confident predictions
+        label_loader = accelerator.prepare(DataLoader(label_ds, batch_size=cfg.batch_size, **dl_kw))
+        pseudo_ds = PseudoLabeledDataset("train", head, train_tf)  # train on pseudo-labels w/ augmentation
+
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         eq_active = use_eq and epoch > cfg.eq_warmup_epochs
-        running, running_eq, seen = 0.0, 0.0, 0
+
+        pseudo_active = use_pseudo and epoch > cfg.pseudo_warmup_epochs
+        if pseudo_active and (epoch - cfg.pseudo_warmup_epochs - 1) % cfg.pseudo_relabel_every == 0:
+            items, r_mean = compute_pseudo_labels(model, label_loader, head, accelerator, cfg.pseudo_conf_frac)
+            pseudo_ds.set_items(items)
+            pl = DataLoader(pseudo_ds, batch_size=cfg.batch_size, shuffle=True, drop_last=False, **dl_kw)
+            pseudo_iter = cycle(accelerator.prepare(pl))
+            if accelerator.is_main_process:
+                print(f"[epoch {epoch:02d}] relabeled {len(items)} confident caps (mean R={r_mean:.2f})")
+
+        running, running_eq, running_pseudo, seen = 0.0, 0.0, 0.0, 0
         for step, batch in enumerate(train_loader):
             if cfg.max_train_batches and step >= cfg.max_train_batches:
                 break
@@ -141,21 +187,31 @@ def train(cfg: TrainConfig) -> None:
             if eq_active:
                 l_eq = equivariance_loss(model, head, next(eq_iter))
                 loss = loss + cfg.lambda_eq * l_eq
+            l_pseudo = torch.zeros((), device=loss.device)
+            if pseudo_active:
+                pb = next(pseudo_iter)
+                l_pseudo = head.loss(model(pb["pixel_values"]).logits, pb["target"])
+                loss = loss + cfg.lambda_pseudo * l_pseudo
             accelerator.backward(loss)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
             running += loss.item()
             running_eq += float(l_eq)
+            running_pseudo += float(l_pseudo)
             seen += 1
 
         syn = evaluate(model, syn_val_loader, head, accelerator)
         real = evaluate(model, real_loader, head, accelerator)
         if accelerator.is_main_process:
-            eq_note = ""
+            notes = ""
             if use_eq:
-                eq_note = " eq_loss=warmup" if not eq_active else f" eq_loss={running_eq / max(1, seen):.4f}"
-            print(f"[epoch {epoch:02d}] loss={running / max(1, seen):.4f}{eq_note}")
+                notes += " eq_loss=warmup" if not eq_active else f" eq_loss={running_eq / max(1, seen):.4f}"
+            if use_pseudo:
+                notes += (
+                    " pseudo_loss=warmup" if not pseudo_active else f" pseudo_loss={running_pseudo / max(1, seen):.4f}"
+                )
+            print(f"[epoch {epoch:02d}] loss={running / max(1, seen):.4f}{notes}")
             print(f"           synthetic-val | {format_metrics(syn)}")
             print(f"           real-test     | {format_metrics(real)}")
         if use_eq:
@@ -167,7 +223,9 @@ def train(cfg: TrainConfig) -> None:
     if accelerator.is_main_process:
         cfg.out_dir.mkdir(parents=True, exist_ok=True)
         aug = "aug" if cfg.augment else "noaug"
-        tag = f"{cfg.task}_{aug}" + (f"_eq{cfg.lambda_eq:g}" if use_eq else "")
+        tag = f"{cfg.task}_{cfg.n_bins}b_{aug}"
+        tag += f"_eq{cfg.lambda_eq:g}" if use_eq else ""
+        tag += f"_pseudo{cfg.lambda_pseudo:g}" if use_pseudo else ""
         ckpt = cfg.out_dir / f"{tag}_{cfg.model_name.replace('/', '_')}.pt"
         torch.save(accelerator.unwrap_model(model).state_dict(), ckpt)
         print(f"\nsaved checkpoint -> {ckpt}")

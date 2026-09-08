@@ -40,6 +40,17 @@ class TrainConfig:
     """Epochs of synthetic-only (L_abs) before enabling L_eq, to build a solid
     absolute anchor before equivariance can drift the real-domain frame."""
 
+    # pseudo-labeling / self-training on unlabeled real caps (0 = off)
+    lambda_pseudo: float = 0.0
+    """Weight of the pseudo-label L_abs on confident real caps."""
+    pseudo_warmup_epochs: int = 20
+    """Epochs of synthetic-only before the first pseudo-labeling pass (needs a
+    usable anchor first — confidence must track correctness)."""
+    pseudo_conf_frac: float = 0.25
+    """Fraction of unlabeled caps to keep, ranked by resultant-length R (confidence)."""
+    pseudo_relabel_every: int = 5
+    """Re-run the pseudo-labeling pass every N epochs with the improved model."""
+
     # optimization
     epochs: int = 40
     batch_size: int = 128
@@ -65,6 +76,10 @@ CONFIGS: dict[str, tuple[str, TrainConfig]] = {
     "eqv": (
         "default + warm-started, small-lambda equivariance on unlabeled real caps",
         TrainConfig(lambda_eq=0.05, eq_warmup_epochs=20),
+    ),
+    "pseudo": (
+        "default + R-gated self-training on unlabeled real caps (warm-start)",
+        TrainConfig(lambda_pseudo=1.0),
     ),
     "regression": ("ResNet-34, (sin, cos) regression, 40 epochs", TrainConfig(task="regression")),
     "smoke": (
