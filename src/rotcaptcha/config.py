@@ -27,6 +27,11 @@ class TrainConfig:
     csl_sigma_bins: float = 2.0
     """Classification only: CSL label-smoothing width, in bins (~degrees at n_bins=360)."""
 
+    # domain augmentation (training synthetic set only; eval is never augmented)
+    augment: bool = True
+    augment_strength: float = 1.0
+    """Scales augmentation probabilities/magnitudes in [0, 1]."""
+
     # optimization
     epochs: int = 40
     batch_size: int = 128
@@ -47,7 +52,8 @@ class TrainConfig:
 
 
 CONFIGS: dict[str, tuple[str, TrainConfig]] = {
-    "default": ("ResNet-34, 360-bin CSL classification, 40 epochs", TrainConfig()),
+    "default": ("ResNet-34, 360-bin CSL classification + augmentation, 40 epochs", TrainConfig()),
+    "noaug": ("default without domain augmentation (Phase-0 A/B baseline)", TrainConfig(augment=False)),
     "regression": ("ResNet-34, (sin, cos) regression, 40 epochs", TrainConfig(task="regression")),
     "smoke": (
         "tiny sanity run (1 epoch, 3 batches)",

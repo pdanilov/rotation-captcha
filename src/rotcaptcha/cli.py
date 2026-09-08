@@ -21,6 +21,7 @@ import tyro
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
+from .augment import build_eval_transform, build_train_transform
 from .config import CONFIGS, TrainConfig
 from .data import RealCaptchaDataset, SyntheticRotationDataset
 from .heads import AngleHead
@@ -57,9 +58,11 @@ def train(cfg: TrainConfig) -> None:
     accelerator = Accelerator(mixed_precision="bf16")
 
     head = cfg.build_head()
-    train_ds = SyntheticRotationDataset("train", head, img_size=cfg.img_size, seed=cfg.seed)
-    syn_val_ds = SyntheticRotationDataset("validation", head, img_size=cfg.img_size, seed=cfg.seed, deterministic=True)
-    real_ds = RealCaptchaDataset("labeled_caps", "test", head, img_size=cfg.img_size)
+    eval_tf = build_eval_transform(cfg.img_size)
+    train_tf = build_train_transform(cfg.img_size, cfg.augment_strength) if cfg.augment else eval_tf
+    train_ds = SyntheticRotationDataset("train", head, train_tf, seed=cfg.seed)
+    syn_val_ds = SyntheticRotationDataset("validation", head, eval_tf, seed=cfg.seed, deterministic=True)
+    real_ds = RealCaptchaDataset("labeled_caps", "test", head, eval_tf)
 
     dl_kw = {"num_workers": cfg.num_workers, "pin_memory": True, "worker_init_fn": seed_worker}
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, drop_last=True, **dl_kw)
@@ -102,7 +105,8 @@ def train(cfg: TrainConfig) -> None:
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         cfg.out_dir.mkdir(parents=True, exist_ok=True)
-        ckpt = cfg.out_dir / f"{cfg.task}_{cfg.model_name.replace('/', '_')}.pt"
+        aug = "aug" if cfg.augment else "noaug"
+        ckpt = cfg.out_dir / f"{cfg.task}_{aug}_{cfg.model_name.replace('/', '_')}.pt"
         torch.save(accelerator.unwrap_model(model).state_dict(), ckpt)
         print(f"\nsaved checkpoint -> {ckpt}")
 

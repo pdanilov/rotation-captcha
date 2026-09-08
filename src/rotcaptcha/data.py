@@ -8,36 +8,28 @@ Two dataset roles:
 
 Both yield `{"pixel_values": FloatTensor[C,H,W], "target": Tensor, "angle": float}`,
 where `target = head.make_target(angle)` — its shape/meaning is the head's concern.
+The image `transform` (PIL -> normalized tensor) is supplied by the caller; see
+augment.py for the eval and augmented-train pipelines.
 """
 
 from __future__ import annotations
 
 import random
+from collections.abc import Callable
 from pathlib import Path
 
+import torch
 from datasets import load_dataset
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
 
 from .geometry import DEFAULT_SIZE, make_disc_sample
 from .heads import AngleHead
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
 ROOT = Path(__file__).resolve().parents[2]
 HF = ROOT / "data" / "hf"
 
-
-def build_transform(img_size: int) -> transforms.Compose:
-    return transforms.Compose(
-        [
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-        ]
-    )
+Transform = Callable[[Image.Image], torch.Tensor]
 
 
 class SyntheticRotationDataset(Dataset):
@@ -52,7 +44,7 @@ class SyntheticRotationDataset(Dataset):
         self,
         split: str,
         head: AngleHead,
-        img_size: int = 224,
+        transform: Transform,
         disc_size: int = DEFAULT_SIZE,
         seed: int = 0,
         deterministic: bool = False,
@@ -60,7 +52,7 @@ class SyntheticRotationDataset(Dataset):
         self.ds = load_dataset("imagefolder", data_dir=str(HF / "coco_objects"), split=split)
         self.head = head
         self.disc_size = disc_size
-        self.tf = build_transform(img_size)
+        self.tf = transform
         self._base_seed = seed
         self.deterministic = deterministic
 
@@ -84,10 +76,10 @@ class SyntheticRotationDataset(Dataset):
 class RealCaptchaDataset(Dataset):
     """Pre-rendered real Baidu discs with a known clockwise angle (eval only)."""
 
-    def __init__(self, subset: str, split: str, head: AngleHead, img_size: int = 224):
+    def __init__(self, subset: str, split: str, head: AngleHead, transform: Transform):
         self.ds = load_dataset("imagefolder", data_dir=str(HF / "captcha" / "baidu" / subset), split=split)
         self.head = head
-        self.tf = build_transform(img_size)
+        self.tf = transform
 
     def __len__(self) -> int:
         return len(self.ds)
