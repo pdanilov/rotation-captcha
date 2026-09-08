@@ -20,6 +20,7 @@ plus a manifest (filename, image_id, category) that build_hf_dataset.py reads fo
 the grouped-by-image split and metadata, without re-reading any annotations.
 
     python scripts/crop_coco_objects.py --split val --min-side 64 --max-per-category 1500
+    python scripts/crop_coco_objects.py --split train --sample 5000 --exclude-categories none
 """
 
 from __future__ import annotations
@@ -122,6 +123,15 @@ def main() -> None:
     )
     ap.add_argument("--limit", type=int, default=None, help="max total crops")
     ap.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        help="sample N base images (streaming, shuffled) instead of the whole split. "
+        "Reads only the shards needed to fill the shuffle buffer, so a small sample of "
+        "the huge train split doesn't download all 117k images.",
+    )
+    ap.add_argument("--seed", type=int, default=0, help="shuffle seed for --sample")
+    ap.add_argument(
         "--exclude-categories",
         default=None,
         help="comma-separated category names to skip (rotationally "
@@ -141,16 +151,26 @@ def main() -> None:
     if exclude:
         print(f"Excluding {len(exclude)} ambiguous categories: {', '.join(sorted(exclude))}")
 
-    print(f"Loading {DATASET} (split={args.split}, rev={REVISION[:7]}) ...")
-    ds = load_dataset(DATASET, split=args.split, revision=REVISION, streaming=args.streaming)
+    # --sample implies streaming: pull only the shards needed, not the full split.
+    streaming = args.streaming or args.sample is not None
+    print(f"Loading {DATASET} (split={args.split}, rev={REVISION[:7]}, streaming={streaming}) ...")
+    ds = load_dataset(DATASET, split=args.split, revision=REVISION, streaming=streaming)
 
     # category index -> name, from the dataset's own feature definition.
     # objects is a dict of List(...) features; category is List(ClassLabel).
+    # Resolve BEFORE shuffle/take, since those can drop the resolved features.
     feat = ds.features
     if feat is None:  # can be unresolved for streaming datasets
         feat = ds._resolve_features().features
     cat_names = feat["objects"]["category"].feature.names
     exclude_idx = {i for i, n in enumerate(cat_names) if n in exclude}
+
+    if args.sample is not None:
+        # Shard order in this dataset is category-unbiased (one shard already spans
+        # all 80 categories), so a modest shuffle buffer + take gives a representative
+        # sample while touching only a few shards. Seeded for reproducibility.
+        ds = ds.shuffle(seed=args.seed, buffer_size=max(args.sample, 10_000)).take(args.sample)
+        print(f"Sampling {args.sample} base images (seed={args.seed}).")
 
     OUT.mkdir(parents=True, exist_ok=True)
     per_cat: dict[int, int] = defaultdict(int)
