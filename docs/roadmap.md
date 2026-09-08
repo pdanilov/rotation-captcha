@@ -54,24 +54,41 @@ Train one plain model on synthetic, test on real, no domain adaptation.
 Deliverable: end-to-end train + eval reporting the metrics above. Then **look at
 the real-cap number.** If the gap is acceptable, we may stop here.
 
+## Results so far (real-test, 200 labeled caps)
+
+| Config | acc@10° | acc@5° | median | note |
+|--------|---------|--------|--------|------|
+| baseline (360-bin, no aug) | 0.21 | — | ~40° | Phase 0 |
+| + augmentation | 0.29 | 0.18 | 44° | win (solve-rate) |
+| **72-bin** + aug | 0.34 | 0.23 | 29° | bin count = biggest single knob |
+| + equivariance `L_eq` | ~0.30 | 0.18 | 34° | **neutral** — relative-only, gauge drift (needs warm-start not to collapse) |
+| **+ pseudo-labeling** | **~0.41** | **~0.28** | **~18°** | current best — adds *absolute* real signal |
+
+Precondition that made pseudo-labeling work (verified read-only on the test set):
+ranking real predictions by resultant-length `R` (confidence), the top 25% scored
+acc@10 0.60 / median 7° vs 0.29 / 41° overall — confidence tracks correctness, so
+confidence-filtered pseudo-labels are mostly right. Self-training on them lifted the
+whole test set, and mean `R` of the confident subset climbed 0.92→0.99 across
+relabelings (the virtuous cycle, no confirmation-bias collapse). MAE stayed ~55°:
+the ambiguous-crop tail stays wrong; the *orientable* caps are what improved.
+
 ## Backlog (only if Phase 0's real-cap gap demands it)
 
 Parked, unordered beyond "cheap and safe before heavy and risky". Each is a single
-lever to add *one at a time*, re-measuring against Phase 0.
+lever to add *one at a time*, re-measuring against the best config above.
 
-- **Output-representation ablation** — swap the head away from the classification
-  baseline: (sin, cos) regression (survey's other top performer, but see Phase 0 —
-  needs a warm start), von Mises (μ, κ) for uncertainty, phase-shifting coder.
-  (Bin-count sweep done in Phase 0: 72 bins wins.)
-- **Input-side domain match** — make synthetic discs *look* like real caps, applied
-  in the fixed captcha frame after rotation so the angle label stays clean:
-  replicate the real disc/ring geometry, histogram-match color, match the JPEG +
-  blur degradation profile, FDA (swap low-freq amplitude, keep phase). GAN
-  translation only as a late, gated stretch.
-- **Feature/loss-side domain adaptation** — AdaBN recalibration on real; two-view
-  equivariance loss `λ·L_eq` on the unlabeled pool; DANN/CORAL alignment.
-- **Semi-supervised** — pseudo-label high-confidence real caps (von Mises κ or TTA
-  agreement), self-train.
+- **Push pseudo-labeling further** (in progress) — loosen `pseudo_conf_frac` (25% may
+  be leaving usable caps unused now that R→0.99); combine pseudo + a small `L_eq`
+  consistency term.
+- **Output-representation ablation** — swap the head: von Mises (μ, κ) for explicit
+  uncertainty (a principled confidence gate for pseudo-labeling), phase-shifting
+  coder. (Bin-count sweep done: 72 bins wins. Regression needs a warm start.)
+- **Input-side domain match** — replicate the real disc/ring geometry, histogram-match
+  color, match the JPEG + blur profile, FDA. GAN translation only as a gated stretch.
+- **Feature-side domain adaptation** — AdaBN recalibration on real; DANN/CORAL.
+  (Plain `L_eq` tried: neutral. Warm-started, small-λ `L_eq` avoids the collapse.)
+- **Clean the anchor** — tighten the ambiguous-crop filter (per-crop, not per-category)
+  to shrink the ~30% unorientable tail that pins MAE.
 - **Architecture** — ViT / Swin; group-equivariant CNN as a principled stretch.
 - **Inference TTA** — average predictions over several known input rotations.
 
