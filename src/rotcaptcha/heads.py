@@ -12,6 +12,7 @@ Implemented:
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -19,6 +20,17 @@ import torch
 import torch.nn.functional as F
 
 from .labels import angle_to_vec, circular_smooth_label
+
+
+def rotate_vec(u: torch.Tensor, delta_rad: torch.Tensor) -> torch.Tensor:
+    """Rotate orientation vectors u=[B,2] (sin, cos) by angle delta (radians).
+
+    Maps the orientation of angle a to that of a+delta:
+    (sin a, cos a) -> (sin(a+delta), cos(a+delta)).
+    """
+    s, c = u[:, 0], u[:, 1]
+    cd, sd = torch.cos(delta_rad), torch.sin(delta_rad)
+    return torch.stack([s * cd + c * sd, -s * sd + c * cd], dim=-1)
 
 
 class AngleHead(ABC):
@@ -36,6 +48,13 @@ class AngleHead(ABC):
     @abstractmethod
     def decode(self, output: torch.Tensor | np.ndarray) -> np.ndarray:
         """Raw outputs [B, output_dim] -> clockwise degrees in [0, 360)."""
+
+    @abstractmethod
+    def orientation_vec(self, output: torch.Tensor) -> torch.Tensor:
+        """Differentiable orientation vector [B, 2] (sin, cos) for equivariance.
+
+        Same direction as `decode`, kept as a tensor so it can flow gradients.
+        """
 
 
 class ClassificationHead(AngleHead):
@@ -67,6 +86,13 @@ class ClassificationHead(AngleHead):
         cos_v = probs @ np.cos(bin_angles)
         return np.degrees(np.arctan2(sin_v, cos_v)) % 360.0
 
+    def orientation_vec(self, output: torch.Tensor) -> torch.Tensor:
+        probs = output.softmax(dim=-1)
+        angles = torch.arange(self.n_bins, device=output.device) / self.n_bins * 2 * math.pi
+        sin_v = (probs * angles.sin()).sum(dim=-1)
+        cos_v = (probs * angles.cos()).sum(dim=-1)
+        return torch.stack([sin_v, cos_v], dim=-1)
+
 
 class RegressionHead(AngleHead):
     """Unit-vector (sin, cos) regression; decode with atan2 (scale-invariant)."""
@@ -83,3 +109,6 @@ class RegressionHead(AngleHead):
         if isinstance(output, torch.Tensor):
             output = output.detach().float().cpu().numpy()
         return np.degrees(np.arctan2(output[:, 0], output[:, 1])) % 360.0
+
+    def orientation_vec(self, output: torch.Tensor) -> torch.Tensor:
+        return F.normalize(output, dim=-1)

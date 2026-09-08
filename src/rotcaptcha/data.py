@@ -93,3 +93,41 @@ class RealCaptchaDataset(Dataset):
             "target": self.head.make_target(angle),
             "angle": angle,
         }
+
+
+class UnlabeledPairDataset(Dataset):
+    """Two independently-rotated views of an unlabeled real cap, for the label-free
+    equivariance loss. Yields `{"v1", "v2", "delta"}` where delta = (r2 - r1) is the
+    known clockwise angle *between* the views (the only supervision).
+    """
+
+    def __init__(
+        self,
+        split: str,
+        transform: Transform,
+        disc_size: int = DEFAULT_SIZE,
+        seed: int = 0,
+        deterministic: bool = False,
+    ):
+        data_dir = str(HF / "captcha" / "baidu" / "unlabeled_caps")
+        self.ds = load_dataset("imagefolder", data_dir=data_dir, split=split)
+        self.tf = transform
+        self.disc_size = disc_size
+        self._base_seed = seed
+        self.deterministic = deterministic
+
+    def __len__(self) -> int:
+        return len(self.ds)
+
+    def __getitem__(self, idx: int) -> dict:
+        img: Image.Image = self.ds[idx]["image"].convert("RGB")
+        rng = random.Random((self._base_seed, idx).__hash__()) if self.deterministic else random
+        r1 = rng.uniform(0.0, 360.0)
+        r2 = rng.uniform(0.0, 360.0)
+        v1 = make_disc_sample(img, r1, size=self.disc_size)
+        v2 = make_disc_sample(img, r2, size=self.disc_size)
+        return {
+            "v1": self.tf(v1),
+            "v2": self.tf(v2),
+            "delta": (r2 - r1) % 360.0,
+        }
