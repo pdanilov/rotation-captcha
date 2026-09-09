@@ -220,7 +220,10 @@ def train(cfg: TrainConfig) -> None:
 
         pseudo_active = use_pseudo and epoch > cfg.pseudo_warmup_epochs
         if pseudo_active and (epoch - cfg.pseudo_warmup_epochs - 1) % cfg.pseudo_relabel_every == 0:
-            items, r_mean = compute_pseudo_labels(model, label_loader, head, accelerator, cfg.pseudo_conf_frac)
+            # Generate pseudo-labels from the EMA teacher, not the raw student: this is
+            # the Mean Teacher design, it labels with the same (averaged) weights the R
+            # precondition was validated on, and EMA is the more accurate/stable labeler.
+            items, r_mean = compute_pseudo_labels(eval_model, label_loader, head, accelerator, cfg.pseudo_conf_frac)
             pseudo_ds.set_items(items)
             pl = DataLoader(pseudo_ds, batch_size=cfg.batch_size, shuffle=True, drop_last=False, **dl_kw)
             pseudo_iter = cycle(accelerator.prepare(pl))
