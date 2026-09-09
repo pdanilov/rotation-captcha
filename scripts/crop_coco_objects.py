@@ -15,12 +15,15 @@ Note on the source schema (differs from native COCO):
 - category is a contiguous 0..79 index; names live in the dataset feature.
 - there is no `iscrowd` flag, so crowd regions are not filtered.
 
-Output: square object crops in data/raw/coco_objects/, resized to --out-size,
-plus a manifest (filename, image_id, category) that build_hf_dataset.py reads for
-the grouped-by-image split and metadata, without re-reading any annotations.
+Output: square object crops in data/raw/coco_objects/<SPLIT_NAME>/, resized to
+--out-size, plus a manifest (filename, image_id, category) that build_hf_dataset.py
+reads for the grouped-by-image split and metadata, without re-reading annotations.
+<SPLIT_NAME> encodes the slice: 'val', 'train', 'train_size=15000',
+'train_from=5000_size=5000', ...
 
     python scripts/crop_coco_objects.py --split val --min-side 64 --max-per-category 1500
-    python scripts/crop_coco_objects.py --split train --sample 5000 --exclude-categories none
+    python scripts/crop_coco_objects.py --split train --sample-size 5000 --exclude-categories none
+    python scripts/crop_coco_objects.py --split train --skip 5000 --sample-size 5000  # held-out
 """
 
 from __future__ import annotations
@@ -82,8 +85,19 @@ def parse_exclude(arg: str | None) -> set[str]:
     return {c.strip() for c in arg.split(",") if c.strip()}
 
 
-OUT = ROOT / "data" / "raw" / "coco_objects"
-MANIFEST = OUT / "manifest.csv"
+CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"
+
+
+def split_dir_name(split: str, skip: int, sample_size: int | None) -> str:
+    """Output subdir name encoding the slice, e.g. 'train', 'train_size=15000',
+    'train_from=10000', 'train_from=1000_size=3000'."""
+    name = split
+    if skip:
+        name += f"_from={skip}"
+    if sample_size is not None:
+        name += f"_size={sample_size}"
+    return name
+
 
 DATASET = "detection-datasets/coco"
 # Pin a revision so the derived crops are reproducible (third-party re-host).
@@ -123,22 +137,23 @@ def main() -> None:
     )
     ap.add_argument("--limit", type=int, default=None, help="max total crops")
     ap.add_argument(
-        "--sample",
-        type=int,
-        default=None,
-        help="take N base images (streaming, in dataset order) instead of the whole "
-        "split. Reads only the shards needed, so a small sample of the huge train split "
-        "doesn't download/process all 117k images.",
-    )
-    ap.add_argument(
         "--skip",
         type=int,
         default=0,
-        help="skip the first M images before taking --sample, i.e. crop the range "
-        "[M, M+N). Shard order here is category-unbiased (verified: one shard spans all "
-        "80 categories), so no shuffle is needed — [0,N) and [N,2N) are already "
-        "disjoint, reproducible, and each representative (e.g. [0,5000) to train a "
-        "filter model, [5000,10000) to then crop+filter with it — no leakage).",
+        help="skip the first M base images (streaming). Independent of --sample-size: "
+        "with it alone you crop the tail [M, end); with --sample-size you crop [M, M+N).",
+    )
+    ap.add_argument(
+        "--sample-size",
+        type=int,
+        default=None,
+        help="take N base images (after any --skip), in dataset order, instead of the "
+        "whole split. Reads only the shards needed, so a small sample of the huge train "
+        "split doesn't download/process all 117k images. Shard order is category-"
+        "unbiased (verified: one shard spans all 80 categories), so no shuffle is "
+        "needed — [0,N) and [N,2N) are already disjoint, reproducible, and each "
+        "representative (e.g. [0,5000) to train a filter model, [5000,10000) to then "
+        "crop+filter with it — no leakage).",
     )
     ap.add_argument(
         "--exclude-categories",
@@ -160,35 +175,40 @@ def main() -> None:
     if exclude:
         print(f"Excluding {len(exclude)} ambiguous categories: {', '.join(sorted(exclude))}")
 
-    # --sample implies streaming: pull only the shards needed, not the full split.
-    streaming = args.streaming or args.sample is not None
+    # skip/take are IterableDataset ops -> they require streaming. Also stream on
+    # --streaming. (skip/take on the fixed shard order is a plain positional slice:
+    # trivially disjoint and reproducible, no shuffle needed.)
+    sliced = args.skip > 0 or args.sample_size is not None
+    streaming = args.streaming or sliced
     print(f"Loading {DATASET} (split={args.split}, rev={REVISION[:7]}, streaming={streaming}) ...")
     ds = load_dataset(DATASET, split=args.split, revision=REVISION, streaming=streaming)
 
     # category index -> name, from the dataset's own feature definition.
     # objects is a dict of List(...) features; category is List(ClassLabel).
-    # Resolve BEFORE shuffle/take, since those can drop the resolved features.
+    # Resolve BEFORE skip/take, since those can drop the resolved features.
     feat = ds.features
     if feat is None:  # can be unresolved for streaming datasets
         feat = ds._resolve_features().features
     cat_names = feat["objects"]["category"].feature.names
     exclude_idx = {i for i, n in enumerate(cat_names) if n in exclude}
 
-    if args.sample is not None:
-        # Shard order is category-unbiased (verified), so a plain positional slice is
-        # representative — and skip/take on the fixed dataset order is trivially disjoint
-        # and reproducible (no shuffle/seed needed).
-        if args.skip:
-            ds = ds.skip(args.skip)
-        ds = ds.take(args.sample)
-        print(f"Sampling images [{args.skip}, {args.skip + args.sample}) (dataset order).")
+    if args.skip:
+        ds = ds.skip(args.skip)
+    if args.sample_size is not None:
+        ds = ds.take(args.sample_size)
+    if sliced:
+        hi = args.skip + args.sample_size if args.sample_size is not None else "end"
+        print(f"Sampling base images [{args.skip}, {hi}) (dataset order).")
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    out_dir = CROPS_BASE / split_dir_name(args.split, args.skip, args.sample_size)
+    manifest = out_dir / "manifest.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output -> {out_dir}")
     per_cat: dict[int, int] = defaultdict(int)
     per_img: dict[int, int] = defaultdict(int)
     n_written = n_skip_small = n_skip_ambig = n_skip_broken = 0
 
-    with MANIFEST.open("w", newline="") as mf:
+    with manifest.open("w", newline="") as mf:
         writer = csv.writer(mf)
         writer.writerow(["filename", "image_id", "category"])
 
@@ -225,14 +245,14 @@ def main() -> None:
                 if args.out_size:
                     crop = crop.resize((args.out_size, args.out_size), Image.Resampling.BICUBIC)
                 name = f"{image_id:012d}_{bbox_id}.jpg"
-                crop.save(OUT / name, quality=92)
+                crop.save(out_dir / name, quality=92)
                 writer.writerow([name, image_id, cat_names[cat]])
                 per_cat[cat] += 1
                 per_img[image_id] += 1
                 n_written += 1
 
-    print(f"\nWrote {n_written} crops -> {OUT}")
-    print(f"  manifest -> {MANIFEST}")
+    print(f"\nWrote {n_written} crops -> {out_dir}")
+    print(f"  manifest -> {manifest}")
     print(f"  skipped: {n_skip_small} too-small, {n_skip_ambig} ambiguous-category, {n_skip_broken} broken image")
 
 
