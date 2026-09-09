@@ -10,8 +10,9 @@ Produced datasets (hf/ mirrors the raw/ layout, incl. the crop slice name):
   data/hf/captcha/baidu/labeled_caps/test/                 metadata: file_name, angle_cw
   data/hf/captcha/baidu/unlabeled_caps/{train,validation}/ metadata: file_name
 
-<SLICE> is the crop-slice subdir produced by crop_coco_objects.py (e.g. 'val',
-'train_from=5000_size=5000'); pass it with --crops.
+<SLICE> is the crop-slice subdir produced by crop_coco_objects.py (e.g.
+'val_cfg=ab12cd', 'train_from=5000_size=5000_cfg=...'); pass it with --crops
+(copy the exact name it printed).
 
 The COCO train/val split is grouped by source `image_id` (all crops from one photo
 go to the same split) to prevent scene/background leakage — which is exactly why

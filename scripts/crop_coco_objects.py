@@ -20,8 +20,10 @@ Note on the source schema (differs from native COCO):
 Output: square object crops in data/raw/coco_objects/<SPLIT_NAME>/, resized to
 --out-size, plus a manifest (filename, image_id, category) that build_hf_dataset.py
 reads for the grouped-by-image split and metadata, without re-reading annotations.
-<SPLIT_NAME> encodes the slice: 'val', 'train', 'train_size=15000',
-'train_from=5000_size=5000', ...
+<SPLIT_NAME> encodes the slice plus a hash of all crop params (min-side, cap,
+exclude, ...): 'val_cfg=ab12cd', 'train_size=15000_cfg=...',
+'train_from=5000_size=5000_cfg=...'. Different params never collide; identical
+params reuse the same dir. The full params are also written to crop_config.json.
 
     python scripts/crop_coco_objects.py --split val --min-side 64 --max-per-category 1500
     python scripts/crop_coco_objects.py --split train --sample-size 5000 --exclude-categories none
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 from collections import defaultdict
@@ -93,15 +96,37 @@ def parse_exclude(arg: str | None) -> set[str]:
 CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"
 
 
-def split_dir_name(split: str, skip: int, sample_size: int | None) -> str:
-    """Output subdir name encoding the slice, e.g. 'train', 'train_size=15000',
-    'train_from=10000', 'train_from=1000_size=3000'."""
-    name = split
-    if skip:
-        name += f"_from={skip}"
-    if sample_size is not None:
-        name += f"_size={sample_size}"
-    return name
+def crop_params(args: argparse.Namespace, exclude: set[str]) -> dict:
+    """Canonical, content-defining parameters of a crop run (no result counts).
+    Used both for the dir-name hash and the crop_config.json record."""
+    return {
+        "dataset": DATASET,
+        "revision": REVISION,
+        "split": args.split,
+        "skip": args.skip,
+        "sample_size": args.sample_size,
+        "min_side": args.min_side,
+        "out_size": args.out_size,
+        "max_per_image": args.max_per_image,
+        "max_per_category": args.max_per_category,
+        "limit": args.limit,
+        "exclude_categories": sorted(exclude),
+    }
+
+
+def split_dir_name(params: dict) -> str:
+    """Output subdir name: readable slice (split/skip/sample_size) + a deterministic
+    hash of all content-defining params, so different params never collide while
+    identical params reuse the same dir. E.g. 'train_size=5000_cfg=a3f9c1',
+    'train_from=5000_size=5000_cfg=...'.
+    """
+    name = params["split"]
+    if params["skip"]:
+        name += f"_from={params['skip']}"
+    if params["sample_size"] is not None:
+        name += f"_size={params['sample_size']}"
+    digest = hashlib.sha1(json.dumps(params, sort_keys=True).encode()).hexdigest()[:6]
+    return f"{name}_cfg={digest}"
 
 
 DATASET = "detection-datasets/coco"
@@ -220,7 +245,8 @@ def main() -> None:
     print(f"Reading {DATASET} {args.split} images [{args.skip}, {hi}) via pyarrow (rev={REVISION[:7]}) ...")
     ds = iter_coco_rows(args.split, args.skip, args.sample_size)
 
-    out_dir = CROPS_BASE / split_dir_name(args.split, args.skip, args.sample_size)
+    params = crop_params(args, exclude)
+    out_dir = CROPS_BASE / split_dir_name(params)
     manifest = out_dir / "manifest.csv"
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output -> {out_dir}")
@@ -274,28 +300,14 @@ def main() -> None:
     # Provenance: full run parameters + counts, so the crop slice is self-describing
     # (the dir name only carries split/skip/sample_size). Its name is the key that
     # training logs via config.coco_slice; this file records the rest.
-    (out_dir / "crop_config.json").write_text(
-        json.dumps(
-            {
-                "dataset": DATASET,
-                "revision": REVISION,
-                "split": args.split,
-                "skip": args.skip,
-                "sample_size": args.sample_size,
-                "min_side": args.min_side,
-                "out_size": args.out_size,
-                "max_per_image": args.max_per_image,
-                "max_per_category": args.max_per_category,
-                "limit": args.limit,
-                "exclude_categories": sorted(exclude),
-                "n_crops": n_written,
-                "n_skip_small": n_skip_small,
-                "n_skip_ambiguous_category": n_skip_ambig,
-                "n_skip_broken": n_skip_broken,
-            },
-            indent=2,
-        )
-    )
+    record = {
+        **params,
+        "n_crops": n_written,
+        "n_skip_small": n_skip_small,
+        "n_skip_ambiguous_category": n_skip_ambig,
+        "n_skip_broken": n_skip_broken,
+    }
+    (out_dir / "crop_config.json").write_text(json.dumps(record, indent=2))
     print(f"\nWrote {n_written} crops -> {out_dir}")
     print(f"  manifest -> {manifest}")
     print(f"  config   -> {out_dir / 'crop_config.json'}")
