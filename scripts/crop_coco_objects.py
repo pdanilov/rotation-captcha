@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
@@ -270,8 +271,34 @@ def main() -> None:
                 per_img[image_id] += 1
                 n_written += 1
 
+    # Provenance: full run parameters + counts, so the crop slice is self-describing
+    # (the dir name only carries split/skip/sample_size). Its name is the key that
+    # training logs via config.coco_slice; this file records the rest.
+    (out_dir / "crop_config.json").write_text(
+        json.dumps(
+            {
+                "dataset": DATASET,
+                "revision": REVISION,
+                "split": args.split,
+                "skip": args.skip,
+                "sample_size": args.sample_size,
+                "min_side": args.min_side,
+                "out_size": args.out_size,
+                "max_per_image": args.max_per_image,
+                "max_per_category": args.max_per_category,
+                "limit": args.limit,
+                "exclude_categories": sorted(exclude),
+                "n_crops": n_written,
+                "n_skip_small": n_skip_small,
+                "n_skip_ambiguous_category": n_skip_ambig,
+                "n_skip_broken": n_skip_broken,
+            },
+            indent=2,
+        )
+    )
     print(f"\nWrote {n_written} crops -> {out_dir}")
     print(f"  manifest -> {manifest}")
+    print(f"  config   -> {out_dir / 'crop_config.json'}")
     print(f"  skipped: {n_skip_small} too-small, {n_skip_ambig} ambiguous-category, {n_skip_broken} broken image")
 
 
