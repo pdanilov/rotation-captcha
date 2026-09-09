@@ -30,6 +30,7 @@ import trackio
 import tyro
 from accelerate import Accelerator
 from coolname import generate_slug
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from torch.utils.data import DataLoader
 
 from .augment import build_eval_transform, build_train_transform
@@ -177,6 +178,18 @@ def train(cfg: TrainConfig) -> None:
         model, optimizer, scheduler, train_loader, syn_val_loader, real_loader
     )
 
+    # Weight EMA (torch's own AveragedModel): a separate averaged copy that eval and
+    # the checkpoint read from, so the saved model is the running mean of weights
+    # rather than one noisy epoch. use_buffers=True also averages BN running stats.
+    ema = None
+    if cfg.ema_decay > 0:
+        ema = AveragedModel(
+            accelerator.unwrap_model(model),
+            multi_avg_fn=get_ema_multi_avg_fn(cfg.ema_decay),
+            use_buffers=True,
+        )
+    eval_model = ema.module if ema is not None else model
+
     eq_iter = eq_val_loader = None
     if use_eq:
         eq_train_ds = UnlabeledPairDataset("train", eval_tf, seed=cfg.seed)
@@ -196,7 +209,8 @@ def train(cfg: TrainConfig) -> None:
     def save_ckpt() -> None:
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
-            torch.save(accelerator.unwrap_model(model).state_dict(), ckpt_path)
+            src = ema.module if ema is not None else accelerator.unwrap_model(model)
+            torch.save(src.state_dict(), ckpt_path)
 
     best_metric, best_epoch, since_improve = float("inf"), 0, 0
     for epoch in range(1, cfg.epochs + 1):
@@ -231,14 +245,16 @@ def train(cfg: TrainConfig) -> None:
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
+            if ema is not None:
+                ema.update_parameters(accelerator.unwrap_model(model))
             running += loss.item()
             running_eq += float(l_eq)
             running_pseudo += float(l_pseudo)
             seen += 1
 
-        syn = evaluate(model, syn_val_loader, head, accelerator)
-        real = evaluate(model, real_loader, head, accelerator)
-        eq = evaluate_equivariance(model, eq_val_loader, head, accelerator) if use_eq else None
+        syn = evaluate(eval_model, syn_val_loader, head, accelerator)
+        real = evaluate(eval_model, real_loader, head, accelerator)
+        eq = evaluate_equivariance(eval_model, eq_val_loader, head, accelerator) if use_eq else None
         if accelerator.is_main_process:
             notes = ""
             if use_eq:

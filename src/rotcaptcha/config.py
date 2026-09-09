@@ -65,6 +65,11 @@ class TrainConfig:
     num_workers: int = 8
     seed: int = 0
 
+    # weight EMA (0 = off): eval/checkpoint use the averaged weights instead of the
+    # raw ones. Tames the epoch-to-epoch real-test swing so the saved model sits near
+    # the mean, not on a random syn-selected epoch. 0.999 ~= a few-epoch half-life here.
+    ema_decay: float = 0.999
+
     # early stopping (0 = off; run all `epochs` and save the last checkpoint)
     patience: int = 0
     """Stop if synthetic-val median hasn't improved for this many epochs; when on,
