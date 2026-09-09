@@ -69,8 +69,16 @@ adaptation** (pseudo-labeling on unlabeled real). Compare within a family.
 | **+ EMA (clean anchor)** | **0.42** | **0.28** | **16°** | new syn-only baseline; stable (std 0.009) |
 | _+ domain adaptation_ | | | | |
 | + equivariance `L_eq` | 0.30 | 0.18 | 34° | **closed** — see below |
-| + pseudo-labeling (frac 0.25) | 0.40 | 0.26 | 19° | adds *absolute* real signal |
-| **+ pseudo-labeling (frac 0.50)** | **0.45** | **0.28** | **13°** | pre-clean-anchor/EMA; re-run pending |
+| pseudo (frac 0.50), pre-clean/EMA | 0.45 | 0.28 | 13° | old base; superseded |
+| **+ pseudo (frac 0.50) on clean+EMA** | **0.56** | **0.44** | **6.3°** | **current best**; EMA teacher |
+
+Current best stack: clean orientability-filtered anchor + weight EMA + pseudo-labeling
+with an EMA teacher — **real acc@10 0.56, median 6.3°** (last-15 mean 0.559±0.008, saved
+epoch 59). The domain-adaptation lift over the synthetic-only clean+EMA baseline (0.42) is
+real and stable. The virtuous cycle held: the confident subset's mean R climbed
+0.82→0.95→0.99→1.00 across relabelings with no confirmation-bias collapse. MAE stayed ~53°
+— the ambiguous-crop tail is still wrong (unfixable without dropping those caps); it's the
+*orientable* caps that jumped, which is exactly what median 6.3° reflects.
 
 Figures are last-15-epoch averages, n=200. **Measurement fix (important):** real-test
 swings ±0.05 acc@10 epoch-to-epoch and is *decoupled* from syn-median (our early-stop
