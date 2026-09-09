@@ -190,6 +190,12 @@ def train(cfg: TrainConfig) -> None:
         label_loader = accelerator.prepare(DataLoader(label_ds, batch_size=cfg.batch_size, **dl_kw))
         pseudo_ds = PseudoLabeledDataset("train", head, train_tf)  # train on pseudo-labels w/ augmentation
 
+    def save_ckpt() -> None:
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            torch.save(accelerator.unwrap_model(model).state_dict(), ckpt_path)
+
+    best_metric, best_epoch, since_improve = float("inf"), 0, 0
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         eq_active = use_eq and epoch > cfg.eq_warmup_epochs
@@ -255,10 +261,25 @@ def train(cfg: TrainConfig) -> None:
                 logm |= {"eq/mae": eq["eq_mae"], "eq/median": eq["eq_median"]}
             trackio.log(logm, step=epoch)
 
-    accelerator.wait_for_everyone()
+        # early stopping on synthetic-val median (identical across processes after
+        # gather, so the stop decision is consistent). When on, keep the BEST ckpt.
+        improved = syn["median"] < best_metric - cfg.min_delta
+        if improved:
+            best_metric, best_epoch, since_improve = syn["median"], epoch, 0
+            if cfg.patience:
+                save_ckpt()
+        else:
+            since_improve += 1
+        if cfg.patience and since_improve >= cfg.patience:
+            if accelerator.is_main_process:
+                print(f"early stop @ epoch {epoch}: no syn-median improvement for {cfg.patience} epochs")
+            break
+
+    if not cfg.patience:  # no early stopping -> save the final model
+        save_ckpt()
     if accelerator.is_main_process:
-        torch.save(accelerator.unwrap_model(model).state_dict(), ckpt_path)
-        print(f"\nsaved checkpoint -> {ckpt_path}")
+        best = f" (best syn-median {best_metric:.2f} @ epoch {best_epoch})" if cfg.patience else ""
+        print(f"\nsaved checkpoint -> {ckpt_path}{best}")
         trackio.finish()
 
 

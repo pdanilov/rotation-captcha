@@ -65,6 +65,13 @@ class TrainConfig:
     num_workers: int = 8
     seed: int = 0
 
+    # early stopping (0 = off; run all `epochs` and save the last checkpoint)
+    patience: int = 0
+    """Stop if synthetic-val median hasn't improved for this many epochs; when on,
+    the *best* (lowest syn-val median) checkpoint is kept instead of the last."""
+    min_delta: float = 0.0
+    """Minimum syn-val median improvement (deg) that counts as progress."""
+
     # run metadata (not hyperparameters; logged to the tracker, ignored by training)
     note: str = ""
     """Free-text 'what is this experiment about', logged to the tracker."""
