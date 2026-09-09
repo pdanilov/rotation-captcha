@@ -84,9 +84,20 @@ on the clean+EMA base before their 0.45 is comparable.
 
 `pseudo_conf_frac` swept: 0.50 beat
 0.25 and 0.75 (0.75's extra noise bloated MAE to 60) — sweet spot in the middle,
-now the default. **Equivariance is closed**: tried three ways — λ=1 collapsed
-real-test (gauge drift, acc@10→0.07); warm-started small-λ was neutral;
-pseudo+small-λ *hurt* (0.40→0.38). Relative-only consistency is not the lever here.
+now the default. **Equivariance is closed (re-tested on the clean+EMA anchor, and the
+loss itself verified bug-free).** On the dirty anchor: λ=1 collapsed real-test (gauge
+drift, acc@10→0.07); warm-started small-λ neutral; pseudo+small-λ *hurt* (0.40→0.38).
+**Re-swept on the clean+EMA anchor** (the fair retest, since all the above predate it):
+same failure, the clean anchor did *not* rescue it — with a 20-epoch warmup, λ=0.05
+slowly drifts real down (0.45→0.40, under the λ=0 baseline 0.42) and λ=0.2 collapses it
+the instant L_eq activates (0.45→0.31, median→74°), while satisfying eq *worse*
+(eq_median 7→14). **Verified it's not an implementation bug:** rotate_vec maps vec(a)→
+vec(a+δ) exactly, and end-to-end on orientable crops decode(v2)−decode(v1) matches a
+known δ=70° to 0–5° (right sign, right magnitude). The deeper reason it can't help: the
+trained model is *already* equivariant to ~2° on the crops that are orientable, so L_eq
+has no signal to add there; on ambiguous crops the resultant is noise, so L_eq only
+injects noise (and drifts the absolute frame when weighted up). Relative-only consistency
+is not the lever here.
 
 Precondition that made pseudo-labeling work (verified read-only on the test set):
 ranking real predictions by resultant-length `R` (confidence), the top 25% scored
