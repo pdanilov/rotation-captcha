@@ -125,6 +125,11 @@ def evaluate_equivariance(model, loader, head: AngleHead, accelerator: Accelerat
 
 
 def train(cfg: TrainConfig) -> None:
+    # Draw the coolname suffix BEFORE seeding: coolname pulls from the stdlib
+    # `random` module, so seeding first would make the suffix deterministic
+    # (every seed=0 run would collide on the same name and overwrite its run_dir).
+    run_name = f"{config_slug(cfg)}__{generate_slug(2)}"
+
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -132,8 +137,6 @@ def train(cfg: TrainConfig) -> None:
     accelerator = Accelerator(mixed_precision="bf16")
     use_eq = cfg.lambda_eq > 0
 
-    # unique, human-readable run name: config slug + random coolname suffix
-    run_name = f"{config_slug(cfg)}__{generate_slug(2)}"
     run_dir = cfg.out_dir / run_name
     ckpt_path = run_dir / "model.pt"
     if accelerator.is_main_process:
