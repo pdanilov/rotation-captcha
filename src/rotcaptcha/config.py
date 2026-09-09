@@ -84,6 +84,9 @@ class TrainConfig:
     """Short labels for filtering/grouping in the tracker (first tag -> trackio group)."""
 
     # bookkeeping
+    trackio: bool = True
+    """Log this run to trackio (--no-trackio to disable). Off for throwaway runs
+    (smoke tests) so they don't pollute the dashboard/history."""
     max_train_batches: int = 0
     """Cap batches per epoch for a smoke test (0 = full epoch)."""
     out_dir: Path = ROOT / "runs"
@@ -119,8 +122,8 @@ CONFIGS: dict[str, tuple[str, TrainConfig]] = {
     ),
     "regression": ("ResNet-34, (sin, cos) regression, 40 epochs", TrainConfig(task="regression")),
     "smoke": (
-        "tiny sanity run (1 epoch, 3 batches)",
-        TrainConfig(epochs=1, max_train_batches=3, batch_size=16, num_workers=2),
+        "tiny sanity run (1 epoch, 3 batches; not logged to trackio)",
+        TrainConfig(epochs=1, max_train_batches=3, batch_size=16, num_workers=2, trackio=False),
     ),
     "long": ("80-epoch classification run", TrainConfig(epochs=80)),
 }

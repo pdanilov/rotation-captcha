@@ -142,16 +142,17 @@ def train(cfg: TrainConfig) -> None:
     ckpt_path = run_dir / "model.pt"
     if accelerator.is_main_process:
         run_dir.mkdir(parents=True, exist_ok=True)
-        tracker_cfg = dataclasses.asdict(cfg)
-        tracker_cfg["out_dir"] = str(cfg.out_dir)
-        tracker_cfg["tags"] = list(cfg.tags)
-        tracker_cfg |= {"run_name": run_name, "checkpoint": str(ckpt_path)}
-        trackio.init(
-            project="rotation-captcha",
-            name=run_name,
-            group=cfg.tags[0] if cfg.tags else None,
-            config=tracker_cfg,
-        )
+        if cfg.trackio:
+            tracker_cfg = dataclasses.asdict(cfg)
+            tracker_cfg["out_dir"] = str(cfg.out_dir)
+            tracker_cfg["tags"] = list(cfg.tags)
+            tracker_cfg |= {"run_name": run_name, "checkpoint": str(ckpt_path)}
+            trackio.init(
+                project="rotation-captcha",
+                name=run_name,
+                group=cfg.tags[0] if cfg.tags else None,
+                config=tracker_cfg,
+            )
 
     head = cfg.build_head()
     eval_tf = build_eval_transform(cfg.img_size)
@@ -278,7 +279,8 @@ def train(cfg: TrainConfig) -> None:
             logm |= {f"real/{k}": v for k, v in real.items() if k != "n"}
             if eq is not None:
                 logm |= {"eq/mae": eq["eq_mae"], "eq/median": eq["eq_median"]}
-            trackio.log(logm, step=epoch)
+            if cfg.trackio:
+                trackio.log(logm, step=epoch)
 
         # early stopping on synthetic-val median (identical across processes after
         # gather, so the stop decision is consistent). When on, keep the BEST ckpt.
@@ -299,7 +301,8 @@ def train(cfg: TrainConfig) -> None:
     if accelerator.is_main_process:
         best = f" (best syn-median {best_metric:.2f} @ epoch {best_epoch})" if cfg.patience else ""
         print(f"\nsaved checkpoint -> {ckpt_path}{best}")
-        trackio.finish()
+        if cfg.trackio:
+            trackio.finish()
 
 
 def main() -> None:
