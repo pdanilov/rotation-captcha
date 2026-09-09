@@ -20,6 +20,11 @@ class TrainConfig:
     """Pretrained backbone from the transformers hub (pretrained is mandatory)."""
     img_size: int = 224
 
+    # data
+    coco_slice: str = "val"
+    """Which COCO crop slice to train on (subdir under data/hf/coco_objects/, produced
+    by crop_coco_objects.py + build_hf_dataset.py). Logged, so each run records its data."""
+
     # task head
     task: Task = "classification"
     n_bins: int = 72

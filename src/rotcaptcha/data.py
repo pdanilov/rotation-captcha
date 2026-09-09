@@ -45,11 +45,13 @@ class SyntheticRotationDataset(Dataset):
         split: str,
         head: AngleHead,
         transform: Transform,
+        coco_slice: str = "val",
         disc_size: int = DEFAULT_SIZE,
         seed: int = 0,
         deterministic: bool = False,
     ):
-        self.ds = load_dataset("imagefolder", data_dir=str(HF / "coco_objects"), split=split)
+        data_dir = str(HF / "coco_objects" / coco_slice)
+        self.ds = load_dataset("imagefolder", data_dir=data_dir, split=split)
         self.head = head
         self.disc_size = disc_size
         self.tf = transform

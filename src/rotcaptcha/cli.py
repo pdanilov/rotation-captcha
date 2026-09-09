@@ -152,8 +152,10 @@ def train(cfg: TrainConfig) -> None:
     head = cfg.build_head()
     eval_tf = build_eval_transform(cfg.img_size)
     train_tf = build_train_transform(cfg.img_size, cfg.augment_strength) if cfg.augment else eval_tf
-    train_ds = SyntheticRotationDataset("train", head, train_tf, seed=cfg.seed)
-    syn_val_ds = SyntheticRotationDataset("validation", head, eval_tf, seed=cfg.seed, deterministic=True)
+    train_ds = SyntheticRotationDataset("train", head, train_tf, coco_slice=cfg.coco_slice, seed=cfg.seed)
+    syn_val_ds = SyntheticRotationDataset(
+        "validation", head, eval_tf, coco_slice=cfg.coco_slice, seed=cfg.seed, deterministic=True
+    )
     real_ds = RealCaptchaDataset("labeled_caps", "test", head, eval_tf)
 
     dl_kw = {"num_workers": cfg.num_workers, "pin_memory": True, "worker_init_fn": seed_worker}
