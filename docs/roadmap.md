@@ -56,16 +56,33 @@ the real-cap number.** If the gap is acceptable, we may stop here.
 
 ## Results so far (real-test, 200 labeled caps)
 
+Two families below: **synthetic-only** (no real data in training) and **+ domain
+adaptation** (pseudo-labeling on unlabeled real). Compare within a family.
+
 | Config | acc@10° | acc@5° | median | note |
 |--------|---------|--------|--------|------|
+| _synthetic-only_ | | | | |
 | baseline (360-bin, no aug) | 0.21 | — | ~40° | Phase 0 |
 | + augmentation | 0.29 | 0.18 | 44° | win (solve-rate) |
 | **72-bin** + aug | 0.34 | 0.23 | 29° | bin count = biggest single knob |
+| + clean anchor (orient≤10) | 0.33 | — | ~30° | noisy est. (std 0.034); see EMA below |
+| **+ EMA (clean anchor)** | **0.42** | **0.28** | **16°** | new syn-only baseline; stable (std 0.009) |
+| _+ domain adaptation_ | | | | |
 | + equivariance `L_eq` | 0.30 | 0.18 | 34° | **closed** — see below |
 | + pseudo-labeling (frac 0.25) | 0.40 | 0.26 | 19° | adds *absolute* real signal |
-| **+ pseudo-labeling (frac 0.50)** | **0.45** | **0.28** | **13°** | current best |
+| **+ pseudo-labeling (frac 0.50)** | **0.45** | **0.28** | **13°** | pre-clean-anchor/EMA; re-run pending |
 
-(All figures last-10-epoch averages, n=200.) `pseudo_conf_frac` swept: 0.50 beat
+Figures are last-15-epoch averages, n=200. **Measurement fix (important):** real-test
+swings ±0.05 acc@10 epoch-to-epoch and is *decoupled* from syn-median (our early-stop
+monitor), so a single syn-selected epoch lands on a near-random real point — the old
+pre-EMA runs' saved checkpoints were unreliable (one landed at 0.28 while its own
+last-15 mean was 0.33). **Weight EMA** (`ema_decay=0.999`, torch `AveragedModel`) cut
+that variance ~4× (std 0.034→0.009) and raised the mean (0.33→0.42): eval and the saved
+checkpoint now read averaged weights, so the deployed model sits near the running mean.
+EMA is on by default for all runs; the pseudo-labeling rows predate it and need a re-run
+on the clean+EMA base before their 0.45 is comparable.
+
+`pseudo_conf_frac` swept: 0.50 beat
 0.25 and 0.75 (0.75's extra noise bloated MAE to 60) — sweet spot in the middle,
 now the default. **Equivariance is closed**: tried three ways — λ=1 collapsed
 real-test (gauge drift, acc@10→0.07); warm-started small-λ was neutral;
@@ -84,9 +101,16 @@ the ambiguous-crop tail stays wrong; the *orientable* caps are what improved.
 Parked, unordered beyond "cheap and safe before heavy and risky". Each is a single
 lever to add *one at a time*, re-measuring against the best config above.
 
-- **Clean the anchor** — tighten the ambiguous-crop filter (per-crop, not per-category)
-  to shrink the ~30% unorientable tail that pins MAE at ~48° while median is 13°.
-  Likely the biggest remaining lever: cleaner anchor → cleaner pseudo-labels.
+- ~~**Clean the anchor**~~ — **done.** Per-crop orientability filter (not per-category):
+  a disposable filter model trained on a disjoint COCO slice scores each crop by its
+  median circular error over 12 rotations (`score_orientability.py`); crops with
+  `orient_median > 10°` are dropped (`filter_orientable.py` → a new raw slice). Threshold
+  read off the per-band contact sheet (`docs/images/orientability_bands.png`): the tail
+  is symmetric objects (orange, umbrella, donut) and textures. Dropped ~20% of crops;
+  syn-only baseline 0.34→0.42 acc@10 (with EMA). Model-free self-similarity was tried
+  first and **failed** (Spearman≈0 vs model error — it measures symmetry, not semantic
+  orientability). Still open: whether to re-run the crop set with the category blocklist
+  removed, and whether to also filter before pseudo-labeling.
 - **Output-representation ablation** — von Mises (μ, κ) for explicit uncertainty (a
   principled confidence gate for pseudo-labeling, vs the current R). Phase-shifting
   coder. (Bin-count sweep done: 72 wins. Regression needs a warm start.)
