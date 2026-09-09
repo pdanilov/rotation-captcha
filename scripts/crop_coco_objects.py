@@ -126,11 +126,27 @@ def main() -> None:
         "--sample",
         type=int,
         default=None,
-        help="sample N base images (streaming, shuffled) instead of the whole split. "
+        help="take N base images (streaming, shuffled) instead of the whole split. "
         "Reads only the shards needed to fill the shuffle buffer, so a small sample of "
         "the huge train split doesn't download all 117k images.",
     )
+    ap.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="skip the first M shuffled images before taking --sample, i.e. crop the "
+        "range [M, M+N). Use the same --seed and --shuffle-buffer across passes to get "
+        "reproducible, non-overlapping splits (e.g. [0,5000) to train a filter model, "
+        "[5000,10000) to then crop+filter with it — no leakage).",
+    )
     ap.add_argument("--seed", type=int, default=0, help="shuffle seed for --sample")
+    ap.add_argument(
+        "--shuffle-buffer",
+        type=int,
+        default=10_000,
+        help="streaming shuffle window. Keep it FIXED across passes: it (with --seed) "
+        "fixes the shuffled order, so --skip/--sample slice disjoint reproducible sets.",
+    )
     ap.add_argument(
         "--exclude-categories",
         default=None,
@@ -166,11 +182,16 @@ def main() -> None:
     exclude_idx = {i for i, n in enumerate(cat_names) if n in exclude}
 
     if args.sample is not None:
-        # Shard order in this dataset is category-unbiased (one shard already spans
-        # all 80 categories), so a modest shuffle buffer + take gives a representative
-        # sample while touching only a few shards. Seeded for reproducibility.
-        ds = ds.shuffle(seed=args.seed, buffer_size=max(args.sample, 10_000)).take(args.sample)
-        print(f"Sampling {args.sample} base images (seed={args.seed}).")
+        # Shard order in this dataset is category-unbiased (one shard already spans all
+        # 80 categories), so a seeded shuffle + skip/take gives a representative sample
+        # while touching only a few shards. buffer_size (with seed) fixes the order, so
+        # different --skip/--sample invocations slice disjoint, reproducible subsets.
+        ds = ds.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer)
+        if args.skip:
+            ds = ds.skip(args.skip)
+        ds = ds.take(args.sample)
+        lo, hi = args.skip, args.skip + args.sample
+        print(f"Sampling shuffled images [{lo}, {hi}) (seed={args.seed}, buffer={args.shuffle_buffer}).")
 
     OUT.mkdir(parents=True, exist_ok=True)
     per_cat: dict[int, int] = defaultdict(int)
