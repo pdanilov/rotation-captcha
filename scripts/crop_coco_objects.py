@@ -169,7 +169,7 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    from datasets import load_dataset  # heavy import; keep it local
+    from datasets import load_dataset, load_dataset_builder  # heavy import; keep it local
 
     exclude = parse_exclude(args.exclude_categories)
     if exclude:
@@ -183,13 +183,11 @@ def main() -> None:
     print(f"Loading {DATASET} (split={args.split}, rev={REVISION[:7]}, streaming={streaming}) ...")
     ds = load_dataset(DATASET, split=args.split, revision=REVISION, streaming=streaming)
 
-    # category index -> name, from the dataset's own feature definition.
+    # category index -> name, from the builder metadata. Do NOT resolve features off
+    # the streaming `ds` itself: that consumes/empties the iterator (yields 0 rows).
     # objects is a dict of List(...) features; category is List(ClassLabel).
-    # Resolve BEFORE skip/take, since those can drop the resolved features.
-    feat = ds.features
-    if feat is None:  # can be unresolved for streaming datasets
-        feat = ds._resolve_features().features
-    cat_names = feat["objects"]["category"].feature.names
+    builder = load_dataset_builder(DATASET, revision=REVISION)
+    cat_names = builder.info.features["objects"]["category"].feature.names
     exclude_idx = {i for i, n in enumerate(cat_names) if n in exclude}
 
     if args.skip:
