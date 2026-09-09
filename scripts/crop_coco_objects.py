@@ -1,5 +1,7 @@
 """Crop object-centered squares from COCO using the HF `detection-datasets/coco`
-dataset (images + boxes in one place — no zip/annotation downloads).
+dataset (images + boxes in one place — no zip/annotation downloads). Its parquet
+shards are read directly with pyarrow (HF streaming is ~1000x slower here because
+every row embeds the image bytes), so --skip/--sample-size slice by shard/row.
 
 Rationale: real rotation captchas show a single recognizable object, upright.
 Arbitrary full scenes make a poor synthetic proxy, so instead of rotating whole
@@ -30,7 +32,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 
 from PIL import Image
@@ -113,6 +117,42 @@ def square_crop_box(x, y, w, h, img_w, img_h):
     return (round(left), round(top), round(left + side), round(top + side))
 
 
+def iter_coco_rows(split: str, skip: int, sample_size: int | None) -> Iterator[dict]:
+    """Yield COCO rows [skip, skip+sample_size) by reading the cached parquet shards
+    directly with pyarrow.
+
+    HF streaming is ~1000x slower here (each row embeds image bytes: ~12 s/img vs
+    ~90 img/s for pyarrow), so we bypass it. Whole shards before `skip` are skipped
+    without reading. Each row is a dict with image_id/width/height/objects and an
+    `image` struct carrying the JPEG `bytes`.
+    """
+    import pyarrow.parquet as pq
+    from huggingface_hub import snapshot_download
+
+    local = snapshot_download(
+        DATASET, repo_type="dataset", revision=REVISION, allow_patterns=[f"data/{split}-*.parquet"]
+    )
+    shards = sorted(Path(local).glob(f"data/{split}-*.parquet"))
+    cols = ["image_id", "width", "height", "objects", "image"]
+    seen = yielded = 0
+    for shard in shards:
+        pf = pq.ParquetFile(shard)
+        nrows = pf.metadata.num_rows
+        if seen + nrows <= skip:  # whole shard is before the window — skip without reading
+            seen += nrows
+            continue
+        for batch in pf.iter_batches(batch_size=64, columns=cols):
+            for row in batch.to_pylist():
+                if seen < skip:
+                    seen += 1
+                    continue
+                if sample_size is not None and yielded >= sample_size:
+                    return
+                seen += 1
+                yielded += 1
+                yield row
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="val", choices=["val", "train"])
@@ -140,20 +180,19 @@ def main() -> None:
         "--skip",
         type=int,
         default=0,
-        help="skip the first M base images (streaming). Independent of --sample-size: "
-        "with it alone you crop the tail [M, end); with --sample-size you crop [M, M+N).",
+        help="skip the first M base images. Independent of --sample-size: with it alone "
+        "you crop the tail [M, end); with --sample-size you crop [M, M+N). Whole shards "
+        "before M are skipped without reading.",
     )
     ap.add_argument(
         "--sample-size",
         type=int,
         default=None,
         help="take N base images (after any --skip), in dataset order, instead of the "
-        "whole split. Reads only the shards needed, so a small sample of the huge train "
-        "split doesn't download/process all 117k images. Shard order is category-"
-        "unbiased (verified: one shard spans all 80 categories), so no shuffle is "
-        "needed — [0,N) and [N,2N) are already disjoint, reproducible, and each "
-        "representative (e.g. [0,5000) to train a filter model, [5000,10000) to then "
-        "crop+filter with it — no leakage).",
+        "whole split — reads only the shards needed. Shard order is category-unbiased "
+        "(verified: one shard spans all 80 categories), so no shuffle is needed: [0,N) "
+        "and [N,2N) are already disjoint, reproducible, and each representative (e.g. "
+        "[0,5000) to train a filter model, [5000,10000) to then crop+filter with it).",
     )
     ap.add_argument(
         "--exclude-categories",
@@ -162,41 +201,23 @@ def main() -> None:
         "ambiguous). Default: the moderate blocklist "
         f"({len(AMBIGUOUS_CATEGORIES)} cats). Use 'none' to keep all.",
     )
-    ap.add_argument(
-        "--streaming",
-        action="store_true",
-        help="stream the dataset instead of downloading it fully",
-    )
     args = ap.parse_args()
 
-    from datasets import load_dataset, load_dataset_builder  # heavy import; keep it local
+    from datasets import load_dataset_builder  # heavy import; keep it local
 
     exclude = parse_exclude(args.exclude_categories)
     if exclude:
         print(f"Excluding {len(exclude)} ambiguous categories: {', '.join(sorted(exclude))}")
 
-    # skip/take are IterableDataset ops -> they require streaming. Also stream on
-    # --streaming. (skip/take on the fixed shard order is a plain positional slice:
-    # trivially disjoint and reproducible, no shuffle needed.)
-    sliced = args.skip > 0 or args.sample_size is not None
-    streaming = args.streaming or sliced
-    print(f"Loading {DATASET} (split={args.split}, rev={REVISION[:7]}, streaming={streaming}) ...")
-    ds = load_dataset(DATASET, split=args.split, revision=REVISION, streaming=streaming)
-
-    # category index -> name, from the builder metadata. Do NOT resolve features off
-    # the streaming `ds` itself: that consumes/empties the iterator (yields 0 rows).
+    # category index -> name, from the builder metadata (pure metadata, no data read).
     # objects is a dict of List(...) features; category is List(ClassLabel).
     builder = load_dataset_builder(DATASET, revision=REVISION)
     cat_names = builder.info.features["objects"]["category"].feature.names
     exclude_idx = {i for i, n in enumerate(cat_names) if n in exclude}
 
-    if args.skip:
-        ds = ds.skip(args.skip)
-    if args.sample_size is not None:
-        ds = ds.take(args.sample_size)
-    if sliced:
-        hi = args.skip + args.sample_size if args.sample_size is not None else "end"
-        print(f"Sampling base images [{args.skip}, {hi}) (dataset order).")
+    hi = args.skip + args.sample_size if args.sample_size is not None else "end"
+    print(f"Reading {DATASET} {args.split} images [{args.skip}, {hi}) via pyarrow (rev={REVISION[:7]}) ...")
+    ds = iter_coco_rows(args.split, args.skip, args.sample_size)
 
     out_dir = CROPS_BASE / split_dir_name(args.split, args.skip, args.sample_size)
     manifest = out_dir / "manifest.csv"
@@ -234,7 +255,7 @@ def main() -> None:
 
                 if image is None:
                     try:
-                        image = row["image"].convert("RGB")
+                        image = Image.open(io.BytesIO(row["image"]["bytes"])).convert("RGB")
                     except Exception:
                         n_skip_broken += 1
                         break
