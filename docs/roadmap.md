@@ -115,11 +115,62 @@ whole test set, and mean `R` of the confident subset climbed 0.92→0.99 across
 relabelings (the virtuous cycle, no confirmation-bias collapse). MAE stayed ~55°:
 the ambiguous-crop tail stays wrong; the *orientable* caps are what improved.
 
+## Where the real-test MAE comes from (diagnosis of the best model)
+
+At acc@10 0.56 / median 6.3° the MAE is still ~53°. A four-step attribution (A: error
+histogram; B: confidence×correctness fork on `R`; C: a baseline-invariant self-consistency
+"thermometer" — rotate each cap by known angles, check the recovered base angle agrees; D:
+eyeball the tail; contact sheet in `docs/images/mae_diagnosis_bands.png`):
+
+- **The tail is not noise, it's 180° flips.** 55% of caps are ≤10°; the error histogram
+  has a hard second peak at 160–180° (22% of caps). 33% of caps (err>45°) account for 92%
+  of the total MAE.
+- **Half the tail is confident, and it's flips.** Splitting err>45° by `R`: ~45 caps are
+  low-R (the model *knew* it was unsure — honest ambiguity), but ~21 are high-R **and**
+  wrong, and 18 of those 21 are flips — the model is *confidently 180° off*.
+- **Three self-orientability classes** (from the thermometer): *orientable* (clear single
+  up, 55%), *polarity-ambiguous* (axis clear, up/down splits into two modes 180° apart,
+  22%), *scattered* (no recoverable up at all, 23%, median 60°).
+- **The captchas are AI-generated *scenes*, not single objects.** Every tail cap carries a
+  「图片由AI生成」("AI-generated") watermark and shows cityscapes, landscapes, industrial
+  views, abstract textures — not the single upright object our COCO-object anchor is built
+  from. So the domain gap is one of *content type*, not just style.
+
+**Verdict:** the high MAE is mostly a property of the captcha *content*, not a model bug.
+~23% (scattered) have no recoverable up even in principle; ~22% (polarity-ambiguous) are
+partly underdetermined; only ~10% (≈20 orientable-but-flipped caps) are a clean, fixable
+model error. Median 6.3° and 55% solved is near the achievable ceiling for this content.
+**MAE is the wrong headline metric here** — it is dominated by an irreducible tail; median
+and acc@10 reflect the solvable caps and should lead.
+
+**The fix (planned, one lever): broaden the anchor with upright scene images.** The
+fixable ≈20 caps and part of the polarity-ambiguous group share one disease — the model
+gets the *axis* but the *polarity* (which way is up), because polarity is a *scene-level*
+cue (sky up, ground down, gravity, building verticals) that a COCO-*object* crop never
+teaches. The medicine for both is the same: train on upright full scenes, not just object
+crops. This reverses the earlier "full scenes are a poor proxy" call — that predated
+knowing the real caps *are* scenes; for AI-scene captchas, upright scenes are the *better*
+proxy. **Source: Places365** (scene images with a canonical up). Must go through the same
+per-crop orientability filter (scenes have their own no-up tail), then mix with the
+existing object anchor (the real pool is mixed) and re-measure acc@10/median vs 0.56.
+Expected yield differs by class: orientable-flipped should recover almost fully (cue is
+present, model just inverts it); polarity-ambiguous only partly (some caps genuinely
+underdetermine up); scattered not at all.
+
 ## Backlog (only if Phase 0's real-cap gap demands it)
 
 Parked, unordered beyond "cheap and safe before heavy and risky". Each is a single
 lever to add *one at a time*, re-measuring against the best config above.
 
+- **→ NEXT: scene anchor (Places365)** — the one lever the MAE diagnosis points to.
+  Add upright full **scene** images (Places365, canonical up) to the object-crop anchor to
+  teach the *scene-level* up cues (horizon, sky, gravity, building verticals) that resolve
+  the 180° polarity flips — the fixable part of the tail. Same pipeline as the object
+  anchor: crop→disc, run the orientability filter (scenes have their own no-up tail), mix
+  with the current clean object slice, retrain (clean+EMA+pseudo), compare acc@10/median
+  vs 0.56. See "Where the real-test MAE comes from" above for why (real caps are AI scenes,
+  not objects) and the expected per-class yield. This reverses the original object-crop
+  decision, which predated knowing the real caps are scenes.
 - ~~**Clean the anchor**~~ — **done.** Per-crop orientability filter (not per-category):
   a disposable filter model trained on a disjoint COCO slice scores each crop by its
   median circular error over 12 rotations (`score_orientability.py`); crops with
