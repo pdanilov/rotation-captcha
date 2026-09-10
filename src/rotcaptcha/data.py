@@ -79,7 +79,9 @@ class RealCaptchaDataset(Dataset):
     """Pre-rendered real Baidu discs with a known clockwise angle (eval only)."""
 
     def __init__(self, subset: str, split: str, head: AngleHead, transform: Transform):
-        self.ds = load_dataset("imagefolder", data_dir=str(HF / "captcha" / "baidu" / subset), split=split)
+        # HF imagefolder normalizes a "val" folder to the canonical "validation" split.
+        hf_split = "validation" if split == "val" else split
+        self.ds = load_dataset("imagefolder", data_dir=str(HF / "captcha" / "baidu" / subset), split=hf_split)
         self.head = head
         self.tf = transform
 

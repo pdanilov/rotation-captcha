@@ -110,7 +110,13 @@ def build_coco(crops_dir: Path, val_frac: float, seed: int, group_by_image: bool
     print(f"crops/{slice_name}: train={len(train)} val={len(val)} ({mode} split)")
 
 
-def build_real_labeled() -> None:
+def build_real_labeled(val_n: int, seed: int) -> None:
+    """Split the labeled caps into a `val` monitor set and a `test` report set.
+
+    `val` (default 50) is a leakage-free early-stop / threshold-tuning monitor;
+    `test` (the rest, ~150) is the reported metric and is NEVER used for selection.
+    The split is a fixed-seed shuffle so it is stable across rebuilds.
+    """
     if not REAL_CSV.exists():
         raise SystemExit(f"Missing {REAL_CSV}; run fetch_real_caps.py first.")
     with REAL_CSV.open(newline="") as f:
@@ -118,8 +124,13 @@ def build_real_labeled() -> None:
             {"src": REAL / r["filename"], "file_name": r["filename"], "angle_cw": r["angle_cw"]}
             for r in csv.DictReader(f)
         ]
-    write_split(HF / "captcha" / "baidu" / "labeled_caps" / "test", rows, ["file_name", "angle_cw"])
-    print(f"captcha/baidu/labeled_caps: test={len(rows)}")
+    random.Random(seed).shuffle(rows)
+    val_n = min(val_n, len(rows) - 1)
+    val, test = rows[:val_n], rows[val_n:]
+    base = HF / "captcha" / "baidu" / "labeled_caps"
+    write_split(base / "val", val, ["file_name", "angle_cw"])
+    write_split(base / "test", test, ["file_name", "angle_cw"])
+    print(f"captcha/baidu/labeled_caps: val={len(val)} test={len(test)} (fixed seed={seed})")
 
 
 def build_real_unlabeled(val_frac: float, seed: int) -> None:
@@ -151,6 +162,12 @@ def main() -> None:
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
+        "--labeled-val-n",
+        type=int,
+        default=50,
+        help="how many labeled caps go to the val (early-stop/tuning) split; the rest are test",
+    )
+    ap.add_argument(
         "--crop-level-split", action="store_true", help="split COCO crops individually instead of grouping by image"
     )
     args = ap.parse_args()
@@ -164,7 +181,7 @@ def main() -> None:
             raise SystemExit(f"No such crop slice: {crops_dir}")
         build_coco(crops_dir, args.val_frac, args.seed, group_by_image=not args.crop_level_split)
     if not args.no_captcha:
-        build_real_labeled()
+        build_real_labeled(args.labeled_val_n, args.seed)
         build_real_unlabeled(args.val_frac, args.seed)
 
     print(f"\nHF datasets under {HF}/ . Load e.g.:")

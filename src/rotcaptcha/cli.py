@@ -161,12 +161,16 @@ def train(cfg: TrainConfig) -> None:
     syn_val_ds = SyntheticRotationDataset(
         "validation", head, eval_tf, coco_slice=cfg.coco_slice, seed=cfg.seed, deterministic=True
     )
-    real_ds = RealCaptchaDataset("labeled_caps", "test", head, eval_tf)
+    # Labeled real caps: `val` (small, the leakage-free early-stop monitor) and `test`
+    # (the reported metric, never used for selection).
+    val_ds = RealCaptchaDataset("labeled_caps", "val", head, eval_tf)
+    test_ds = RealCaptchaDataset("labeled_caps", "test", head, eval_tf)
 
     dl_kw = {"num_workers": cfg.num_workers, "pin_memory": True, "worker_init_fn": seed_worker}
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, drop_last=True, **dl_kw)
     syn_val_loader = DataLoader(syn_val_ds, batch_size=cfg.batch_size, **dl_kw)
-    real_loader = DataLoader(real_ds, batch_size=cfg.batch_size, **dl_kw)
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, **dl_kw)
+    test_loader = DataLoader(test_ds, batch_size=cfg.batch_size, **dl_kw)
 
     model = build_model(cfg.model_name, head.output_dim)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -175,8 +179,8 @@ def train(cfg: TrainConfig) -> None:
         steps_per_epoch = min(steps_per_epoch, cfg.max_train_batches)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs * steps_per_epoch)
 
-    model, optimizer, scheduler, train_loader, syn_val_loader, real_loader = accelerator.prepare(
-        model, optimizer, scheduler, train_loader, syn_val_loader, real_loader
+    model, optimizer, scheduler, train_loader, syn_val_loader, val_loader, test_loader = accelerator.prepare(
+        model, optimizer, scheduler, train_loader, syn_val_loader, val_loader, test_loader
     )
 
     # Weight EMA (torch's own AveragedModel): a separate averaged copy that eval and
@@ -257,7 +261,8 @@ def train(cfg: TrainConfig) -> None:
             seen += 1
 
         syn = evaluate(eval_model, syn_val_loader, head, accelerator)
-        real = evaluate(eval_model, real_loader, head, accelerator)
+        val = evaluate(eval_model, val_loader, head, accelerator)
+        test = evaluate(eval_model, test_loader, head, accelerator)
         eq = evaluate_equivariance(eval_model, eq_val_loader, head, accelerator) if use_eq else None
         if accelerator.is_main_process:
             notes = ""
@@ -269,7 +274,8 @@ def train(cfg: TrainConfig) -> None:
                 )
             print(f"[epoch {epoch:02d}] loss={running / max(1, seen):.4f}{notes}")
             print(f"           synthetic-val | {format_metrics(syn)}")
-            print(f"           real-test     | {format_metrics(real)}")
+            print(f"           real-val      | {format_metrics(val)}")
+            print(f"           real-test     | {format_metrics(test)}")
             if eq is not None:
                 print(f"           unlabeled-eq  | eq_MAE={eq['eq_mae']:.2f} eq_median={eq['eq_median']:.2f}")
 
@@ -279,30 +285,32 @@ def train(cfg: TrainConfig) -> None:
             if pseudo_active:
                 logm["train/pseudo_loss"] = running_pseudo / max(1, seen)
             logm |= {f"syn/{k}": v for k, v in syn.items() if k != "n"}
-            logm |= {f"real/{k}": v for k, v in real.items() if k != "n"}
+            logm |= {f"val/{k}": v for k, v in val.items() if k != "n"}
+            logm |= {f"test/{k}": v for k, v in test.items() if k != "n"}
             if eq is not None:
                 logm |= {"eq/mae": eq["eq_mae"], "eq/median": eq["eq_median"]}
             if cfg.trackio:
                 trackio.log(logm, step=epoch)
 
-        # early stopping on synthetic-val median (identical across processes after
-        # gather, so the stop decision is consistent). When on, keep the BEST ckpt.
-        improved = syn["median"] < best_metric - cfg.min_delta
+        # early stopping on real-val median (the leakage-free monitor; test is never
+        # used for selection). Identical across processes after gather, so the stop
+        # decision is consistent. When on, keep the BEST (lowest val-median) ckpt.
+        improved = val["median"] < best_metric - cfg.min_delta
         if improved:
-            best_metric, best_epoch, since_improve = syn["median"], epoch, 0
+            best_metric, best_epoch, since_improve = val["median"], epoch, 0
             if cfg.patience:
                 save_ckpt()
         else:
             since_improve += 1
         if cfg.patience and since_improve >= cfg.patience:
             if accelerator.is_main_process:
-                print(f"early stop @ epoch {epoch}: no syn-median improvement for {cfg.patience} epochs")
+                print(f"early stop @ epoch {epoch}: no val-median improvement for {cfg.patience} epochs")
             break
 
     if not cfg.patience:  # no early stopping -> save the final model
         save_ckpt()
     if accelerator.is_main_process:
-        best = f" (best syn-median {best_metric:.2f} @ epoch {best_epoch})" if cfg.patience else ""
+        best = f" (best val-median {best_metric:.2f} @ epoch {best_epoch})" if cfg.patience else ""
         print(f"\nsaved checkpoint -> {ckpt_path}{best}")
         if cfg.trackio:
             trackio.finish()
