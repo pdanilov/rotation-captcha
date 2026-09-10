@@ -193,7 +193,19 @@ lever to add *one at a time*, re-measuring against the best config above.
   23.5°** (see results table + the two findings above). `ingest_places_scenes.py` does the
   global seeded shuffle; the rest of the pipeline (score → filter → merge → train) is
   reused unchanged.
-- **→ NEXT: scene-dominant mix ratio + more scenes.** The current mix is ~80/20
+- **→ NEXT (ablation, resolves "did we overbuild?"): whole COCO images, no crops, no
+  Places, no orientability filter — but in our label-free regime (EMA + pseudo, real caps
+  never trained on).** The reference solver (yixiaowang2001/rotate-captcha-solver, ~73%
+  live pass) uses *whole* COCO images with zero filtering and no object crops (verified in
+  its `utils/image_utils.py`), then fine-tunes on the 200 labeled caps. This ablation asks
+  whether the simple data path reproduces our 0.76 *without* the crops→clean→scenes
+  machinery. If it does, most of that machinery was avoidable (whole images sidestep the
+  object-crop flip problem); if it doesn't, the cleaning + diverse scenes are what carried
+  the label-free regime to parity while the reference only got away without them by
+  training on real labels. Either outcome is knowledge the reference never measured. Cheap:
+  add a whole-image mode to the COCO ingest (skip bbox, center-square→resize), ~20k images,
+  train pseudo 0.75 on our val/test protocol, compare to 0.76.
+- **scene-dominant mix ratio + more scenes.** The current mix is ~80/20
   COCO/Places (an accident of slice sizes), but the real caps *are* scenes — the anchor
   should probably be scene-dominant. Ingest more diverse Places (disjoint from the filter's
   train window), filter, and rebalance toward ~50/50 (and beyond), retrain with pseudo
