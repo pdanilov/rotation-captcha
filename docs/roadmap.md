@@ -43,10 +43,17 @@ Train one plain model on synthetic, test on real, no domain adaptation.
   default.**
   Decode with a circular soft-argmax (probability-weighted mean on the circle),
   which is seam-safe and gives sub-bin resolution.
-- Why not regression: direct (sin, cos) regression **does not train from scratch**
-  on this task — confirmed here (in-domain synthetic stalled at ~50° MAE) and from
-  prior experience. Classification + CSL is the survey's other top performer and the
-  known-good lumina37 baseline.
+- Why classification, not regression: direct (sin, cos) regression stalled at ~50° MAE
+  here — but note that was on the *uncleaned* anchor, and the failure is a
+  noise-sensitivity one, not a fundamental "regression can't train". Its MSE loss is
+  dominated by the ~30% unorientable crops' near-random targets; classification + CSL is
+  robust to the same noise (bounded softmax gradients, the model can hedge with a flat/
+  low-R distribution), so on identical dirty data classification reached median 3.5° while
+  regression stalled. On the *clean* anchor regression-from-scratch is worth re-testing —
+  don't treat its earlier failure as fundamental. Classification + CSL remains the base
+  because it also yields the R confidence signal pseudo-labeling depends on, and gives
+  sub-bin precision via soft-argmax (median 2.8° « the 5° bin). See the output-representation
+  backlog item for regression done *right* (coarse-to-fine, von Mises).
 - Data: COCO crop → random rotation α → circular mask → resize. Label = bin(α).
 - Loss: soft cross-entropy against the CSL target.
 - Infra: accelerate, bf16.
@@ -201,9 +208,22 @@ lever to add *one at a time*, re-measuring against the best config above.
   first and **failed** (Spearman≈0 vs model error — it measures symmetry, not semantic
   orientability). Still open: whether to re-run the crop set with the category blocklist
   removed, and whether to also filter before pseudo-labeling.
-- **Output-representation ablation** — von Mises (μ, κ) for explicit uncertainty (a
-  principled confidence gate for pseudo-labeling, vs the current R). Phase-shifting
-  coder. (Bin-count sweep done: 72 wins. Regression needs a warm start.)
+- **Output-representation: precision & calibrated uncertainty** (a *precision* lever, not
+  an acc@10 one — see the caveat). Two ideas, both keeping the classification stage:
+  - **von Mises (μ, κ)** — a calibrated concentration κ instead of the heuristic R. Its
+    real payoff is a *cleaner pseudo-labeling gate* (κ is calibrated; R is a heuristic),
+    which is the one path by which an output-representation change can help acc@10 —
+    *indirectly*, via better pseudo-labels → stronger adaptation.
+  - **Coarse-to-fine (classify bin → regress the in-bin residual)** — trainable where
+    plain regression is not: the classification stage already resolves coarse orientation
+    incl. polarity, so the regression target is a clean bounded ±2.5° residual (no 180°
+    noise), and R survives from the coarse stage. Sharpens median / acc@1–2.
+  - **Caveat (why this is not the acc@10 lever):** median is already 2.8° « 5° bin, so
+    soft-argmax already interpolates — precision is not our bottleneck. What keeps acc@10
+    below ~0.8 is the *tail* (180° flips + scattered/unorientable caps), which the coarse
+    stage owns; sub-bin refinement does not touch it. Pursue these if the captcha tolerance
+    turns out tight (≤2–3°, unknown without a live endpoint) or for the pseudo-gate win —
+    not to break the acc@10 ceiling. (Bin-count sweep done: 72 wins.)
 - **Input-side domain match** — replicate the real disc/ring geometry, histogram-match
   color, match the JPEG + blur profile, FDA. GAN translation only as a gated stretch.
 - **Architecture** — ViT / Swin; group-equivariant CNN as a principled stretch.
