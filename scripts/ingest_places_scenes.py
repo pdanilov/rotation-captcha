@@ -10,10 +10,15 @@ MAE comes from".
 
 Unlike crop_coco_objects.py there is nothing to crop: each row is already one scene
 image. We just center-square + resize to --out-size (make_disc_sample re-squares
-anyway; doing it here keeps files small and matches the COCO crops on disk). Parquet
-shards are read directly with pyarrow (rows embed image bytes, so HF streaming is
-~1000x slower), and --skip/--sample-size slice by shard/row exactly like the COCO tool:
-[0,10000) to train a disposable filter model, [10000,15000) to then score+filter with it.
+anyway; doing it here keeps files small and matches the COCO crops on disk).
+
+Places365 is sorted by class (5000 imgs/class, contiguous), so a sequential first-N
+slice would be a handful of classes. Instead we globally shuffle all 39 shards' index
+with --seed and take the window --skip:--skip+--sample-size from that permutation, so
+every window spans all 365 classes and [0,N)/[N,2N) stay disjoint and reproducible:
+[0,10000) trains a disposable filter model, [10000,15000) is the held-out set to
+score+filter with it. Shards (all cached) are read one at a time, decoding only the
+selected rows.
 
 Output: data/raw/crops/places_<...>_cfg=<hash>/ with the scene images, a manifest
 (filename, image_id, category) and crop_config.json. The base dir is shared with COCO on
@@ -53,6 +58,7 @@ def scene_params(args: argparse.Namespace) -> dict:
         "revision": REVISION,
         "skip": args.skip,
         "sample_size": args.sample_size,
+        "seed": args.seed,
         "min_side": args.min_side,
         "out_size": args.out_size,
         "limit": args.limit,
@@ -60,7 +66,9 @@ def scene_params(args: argparse.Namespace) -> dict:
 
 
 def slice_dir_name(params: dict) -> str:
-    """places_[from=M_]size=N_cfg=<hash>, matching the COCO slice convention."""
+    """places_[from=M_]size=N_cfg=<hash>, matching the COCO slice convention. The
+    seed lives in the hash, so shuffled slices never collide with the old sequential
+    ones (different params -> different cfg=)."""
     name = "places"
     if params["skip"]:
         name += f"_from={params['skip']}"
@@ -70,36 +78,38 @@ def slice_dir_name(params: dict) -> str:
     return f"{name}_cfg={digest}"
 
 
-def iter_places_rows(skip: int, sample_size: int | None) -> Iterator[dict]:
-    """Yield rows [skip, skip+sample_size) by downloading parquet shards lazily.
+def iter_places_rows(skip: int, sample_size: int | None, seed: int) -> Iterator[dict]:
+    """Yield a class-DIVERSE sample by globally shuffling all shards, then taking the
+    window [skip, skip+sample_size) of the shuffled order.
 
-    Shards are fetched one at a time with hf_hub_download and dropped once the window
-    is reached, so a [0,15000) slice pulls only shard 0 (~46k rows) instead of the whole
-    ~tens-of-GB dataset (which snapshot_download's glob would grab up front).
+    Places365 is sorted by class (exactly 5000 imgs/class, contiguous), so a sequential
+    first-N slice would be a handful of classes. We build the global index over all 39
+    shards, seed-shuffle it, and select our window from that permutation -> every window
+    spans the full 365-class spread, and [0,N)/[N,2N) stay disjoint and reproducible.
+    Shards are read one at a time (all cached) and only the selected rows are decoded.
     """
+    import numpy as np
     import pyarrow.parquet as pq
     from huggingface_hub import hf_hub_download, list_repo_files
 
     shard_names = sorted(f for f in list_repo_files(DATASET, repo_type="dataset") if f.endswith(".parquet"))
-    cols = ["image", "label"]  # image is a struct {bytes, path}
-    seen = yielded = 0
-    for name in shard_names:
-        shard = hf_hub_download(DATASET, name, repo_type="dataset", revision=REVISION)
-        pf = pq.ParquetFile(shard)
-        nrows = pf.metadata.num_rows
-        if seen + nrows <= skip:  # whole shard is before the window
-            seen += nrows
+    paths = [hf_hub_download(DATASET, n, repo_type="dataset", revision=REVISION) for n in shard_names]
+    offsets, total = [], 0
+    for p in paths:  # cheap: parquet footer only
+        offsets.append(total)
+        total += pq.ParquetFile(p).metadata.num_rows
+
+    order = np.random.default_rng(seed).permutation(total)
+    hi = skip + sample_size if sample_size is not None else total
+    picked = set(order[skip:hi].tolist())  # global indices we want, in no particular order
+
+    for path, off in zip(paths, offsets, strict=True):
+        nrows = pq.ParquetFile(path).metadata.num_rows
+        local = [g - off for g in range(off, off + nrows) if g in picked]
+        if not local:
             continue
-        for batch in pf.iter_batches(batch_size=64, columns=cols):
-            for row in batch.to_pylist():
-                if seen < skip:
-                    seen += 1
-                    continue
-                if sample_size is not None and yielded >= sample_size:
-                    return
-                seen += 1
-                yielded += 1
-                yield row
+        table = pq.read_table(path, columns=["image", "label"]).take(local)
+        yield from table.to_pylist()
 
 
 def main() -> None:
@@ -107,10 +117,11 @@ def main() -> None:
     ap.add_argument("--min-side", type=int, default=64, help="skip images smaller than this on any side")
     ap.add_argument("--out-size", type=int, default=256, help="resize each square scene to this size (px)")
     ap.add_argument("--limit", type=int, default=None, help="max total scenes")
-    ap.add_argument("--skip", type=int, default=0, help="skip the first M images (whole shards skipped unread)")
+    ap.add_argument("--skip", type=int, default=0, help="offset into the shuffled order (for a disjoint held-out window)")
     ap.add_argument(
-        "--sample-size", type=int, default=None, help="take N images after --skip (reads only the shards needed)"
+        "--sample-size", type=int, default=None, help="take N images from the shuffled order after --skip"
     )
+    ap.add_argument("--seed", type=int, default=0, help="global-shuffle seed (baked into the slice hash)")
     args = ap.parse_args()
 
     params = scene_params(args)
@@ -119,14 +130,14 @@ def main() -> None:
     manifest = out_dir / "manifest.csv"
 
     hi = args.skip + args.sample_size if args.sample_size is not None else "end"
-    print(f"Reading {DATASET} images [{args.skip}, {hi}) via pyarrow (rev={REVISION[:7]}) ...")
+    print(f"Sampling {DATASET} shuffled[{args.skip}, {hi}) seed={args.seed} (rev={REVISION[:7]}) ...")
     print(f"Output -> {out_dir}")
 
     n_written = n_skip_small = n_skip_broken = 0
     with manifest.open("w", newline="") as mf:
         writer = csv.writer(mf)
         writer.writerow(["filename", "image_id", "category"])
-        for i, row in enumerate(tqdm(iter_places_rows(args.skip, args.sample_size), desc="scene")):
+        for i, row in enumerate(tqdm(iter_places_rows(args.skip, args.sample_size, args.seed), desc="scene")):
             if args.limit and n_written >= args.limit:
                 break
             try:
