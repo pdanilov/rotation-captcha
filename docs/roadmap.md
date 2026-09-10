@@ -67,32 +67,50 @@ adaptation** (pseudo-labeling on unlabeled real). Compare within a family.
 | **72-bin** + aug | 0.34 | 0.23 | 29° | bin count = biggest single knob |
 | + clean anchor (orient≤10) | 0.33 | — | ~30° | noisy est. (std 0.034); see EMA below |
 | **+ EMA (clean anchor)** | **0.42** | **0.28** | **16°** | new syn-only baseline; stable (std 0.009) |
+| + clean COCO anchor + EMA | 0.42 | 0.28 | 16° | COCO objects only |
+| **+ diverse Places scenes (365 cls), COCO+Places** | **0.65** | 0.45 | **6.5°** | scenes alone, no pseudo; MAE 28.9° |
 | _+ domain adaptation_ | | | | |
 | + equivariance `L_eq` | 0.30 | 0.18 | 34° | **closed** — see below |
-| pseudo (frac 0.50), pre-clean/EMA | 0.45 | 0.28 | 13° | old base; superseded |
-| **+ pseudo (frac 0.50) on clean+EMA** | **0.56** | **0.44** | **6.3°** | **current best**; EMA teacher |
+| + pseudo (frac 0.50) on clean COCO+EMA | 0.56 | 0.44 | 6.3° | COCO only; MAE ~53° |
+| **+ pseudo (frac 0.75) on diverse COCO+Places** | **0.75** | **0.64** | **2.81°** | **current best**; MAE 23.5° |
 
-Current best stack: clean orientability-filtered anchor + weight EMA + pseudo-labeling
-with an EMA teacher — **real acc@10 0.56, median 6.3°** (last-15 mean 0.559±0.008, saved
-epoch 59). The domain-adaptation lift over the synthetic-only clean+EMA baseline (0.42) is
-real and stable. The virtuous cycle held: the confident subset's mean R climbed
-0.82→0.95→0.99→1.00 across relabelings with no confirmation-bias collapse. MAE stayed ~53°
-— the ambiguous-crop tail is still wrong (unfixable without dropping those caps); it's the
-*orientable* caps that jumped, which is exactly what median 6.3° reflects.
+Current best stack: clean orientability-filtered anchor of COCO objects **+ diverse
+Places365 scenes** (365 classes) + weight EMA + pseudo-labeling (frac 0.75, EMA teacher)
+— **real acc@10 0.75, median 2.81°, MAE 23.5°** (test split, 150 caps; val-selected).
 
-Figures are last-15-epoch averages, n=200. **Measurement fix (important):** real-test
-swings ±0.05 acc@10 epoch-to-epoch and is *decoupled* from syn-median (our early-stop
-monitor), so a single syn-selected epoch lands on a near-random real point — the old
-pre-EMA runs' saved checkpoints were unreliable (one landed at 0.28 while its own
-last-15 mean was 0.33). **Weight EMA** (`ema_decay=0.999`, torch `AveragedModel`) cut
-that variance ~4× (std 0.034→0.009) and raised the mean (0.33→0.42): eval and the saved
-checkpoint now read averaged weights, so the deployed model sits near the running mean.
-EMA is on by default for all runs; the pseudo-labeling rows predate it and need a re-run
-on the clean+EMA base before their 0.45 is comparable.
+Two findings drove the jump from 0.56 to 0.75:
 
-`pseudo_conf_frac` swept: 0.50 beat
-0.25 and 0.75 (0.75's extra noise bloated MAE to 60) — sweet spot in the middle,
-now the default. **Equivariance is closed (re-tested on the clean+EMA anchor, and the
+- **Scene content is the biggest lever.** The real caps are AI-generated *scenes*, not
+  single objects (see "Where the real-test MAE comes from"). Adding diverse upright
+  Places365 scenes to the COCO-object anchor — *with no pseudo-labeling at all* — took the
+  synthetic-only baseline from 0.42 to **0.65** and, crucially, **halved MAE (53→28.9°)**
+  by teaching the scene-level up-cues that resolve the 180° polarity flips. Diversity
+  mattered, not just "scenes": a first attempt with a class-degenerate Places sample (1
+  scene class, from Places365's class-sorted order) helped far less; the fix was a global
+  seeded shuffle over all 39 shards so every slice spans all 365 classes.
+- **Pseudo-labeling still adds on top (correcting an earlier wrong call).** On the
+  *degenerate* mix, pseudo looked redundant — but that was an artifact of the 1-class
+  scenes and a syn-median early-stop that cut it short. On the *diverse* mix with a
+  real-val early-stop, a frac sweep {0.25/0.5/0.75} (selected on val) gives pseudo a clean
+  **+0.10** (0.65→0.75); frac 0.75 won on val, 0.5 essentially tied (test 0.72 / MAE 21).
+
+MAE finally moved the whole way: 53° → 28.9° (scenes) → 23.5° (+pseudo), and median is now
+2.8° — well inside a plausible captcha tolerance.
+
+**Evaluation protocol.** The 200 labeled caps are split (fixed seed) into `val` (50) and
+`test` (150). Early stopping and any hyperparameter choice (e.g. the frac sweep) use
+`val` only; `test` is reported and never used for selection — no leakage. Earlier rows
+marked n=200 predate the split; newer rows (diverse mix, pseudo 0.75) are on the 150-cap
+test. **Weight EMA** (`ema_decay=0.999`, torch `AveragedModel`) is on for all runs: it
+cut the epoch-to-epoch real variance ~4× (std 0.034→0.009), so eval and the saved
+checkpoint read averaged weights. Before the val split we early-stopped on **syn-median**,
+which is decoupled from real accuracy and stopped runs before their real peak (0.55 vs a
+~0.65 plateau) while a fixed budget drifted past it (0.60) — hence the switch to a
+real-val monitor.
+
+`pseudo_conf_frac` sweeps are base-dependent: on the old clean-COCO base 0.50 won; on the
+diverse COCO+Places base **0.75** won on val (0.5 tied on test). No fixed default —
+re-sweep per base. **Equivariance is closed (re-tested on the clean+EMA anchor, and the
 loss itself verified bug-free).** On the dirty anchor: λ=1 collapsed real-test (gauge
 drift, acc@10→0.07); warm-started small-λ neutral; pseudo+small-λ *hurt* (0.40→0.38).
 **Re-swept on the clean+EMA anchor** (the fair retest, since all the above predate it):
@@ -162,15 +180,17 @@ underdetermine up); scattered not at all.
 Parked, unordered beyond "cheap and safe before heavy and risky". Each is a single
 lever to add *one at a time*, re-measuring against the best config above.
 
-- **→ NEXT: scene anchor (Places365)** — the one lever the MAE diagnosis points to.
-  Add upright full **scene** images (Places365, canonical up) to the object-crop anchor to
-  teach the *scene-level* up cues (horizon, sky, gravity, building verticals) that resolve
-  the 180° polarity flips — the fixable part of the tail. Same pipeline as the object
-  anchor: crop→disc, run the orientability filter (scenes have their own no-up tail), mix
-  with the current clean object slice, retrain (clean+EMA+pseudo), compare acc@10/median
-  vs 0.56. See "Where the real-test MAE comes from" above for why (real caps are AI scenes,
-  not objects) and the expected per-class yield. This reverses the original object-crop
-  decision, which predated knowing the real caps are scenes.
+- ~~**scene anchor (Places365)**~~ — **done, and it was the biggest lever.** Adding
+  diverse (365-class, shuffled) upright Places365 scenes to the COCO-object anchor took
+  synthetic-only from 0.42→0.65 and MAE 53→28.9°, and pseudo on top reached **0.75 / MAE
+  23.5°** (see results table + the two findings above). `ingest_places_scenes.py` does the
+  global seeded shuffle; the rest of the pipeline (score → filter → merge → train) is
+  reused unchanged.
+- **→ NEXT: scene-dominant mix ratio + more scenes.** The current mix is ~80/20
+  COCO/Places (an accident of slice sizes), but the real caps *are* scenes — the anchor
+  should probably be scene-dominant. Ingest more diverse Places (disjoint from the filter's
+  train window), filter, and rebalance toward ~50/50 (and beyond), retrain with pseudo
+  (frac 0.75), measure on val→test. Cheap: the whole pipeline is built.
 - ~~**Clean the anchor**~~ — **done.** Per-crop orientability filter (not per-category):
   a disposable filter model trained on a disjoint COCO slice scores each crop by its
   median circular error over 12 rotations (`score_orientability.py`); crops with
