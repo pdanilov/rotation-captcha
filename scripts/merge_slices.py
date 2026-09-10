@@ -20,7 +20,7 @@ import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"
+CROPS_BASE = ROOT / "data" / "raw" / "crops"
 
 
 def link_or_copy(src: Path, dst: Path) -> None:

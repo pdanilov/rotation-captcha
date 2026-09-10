@@ -22,7 +22,7 @@ class TrainConfig:
 
     # data
     coco_slice: str = "val"
-    """Which COCO crop slice to train on (subdir under data/hf/coco_objects/, produced
+    """Which COCO crop slice to train on (subdir under data/hf/crops/, produced
     by crop_coco_objects.py + build_hf_dataset.py). Logged, so each run records its data."""
 
     # task head

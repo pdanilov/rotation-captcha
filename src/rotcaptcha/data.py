@@ -50,7 +50,7 @@ class SyntheticRotationDataset(Dataset):
         seed: int = 0,
         deterministic: bool = False,
     ):
-        data_dir = str(HF / "coco_objects" / coco_slice)
+        data_dir = str(HF / "crops" / coco_slice)
         self.ds = load_dataset("imagefolder", data_dir=data_dir, split=split)
         self.head = head
         self.disc_size = disc_size

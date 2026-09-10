@@ -6,7 +6,7 @@ manifest, provenance) whose name flows into training's config.coco_slice -> the
 tracker, and build_hf_dataset stays a dumb "folder -> train/val" splitter with no
 dependency on a checkpoint or threshold.
 
-Input: a source slice under data/raw/coco_objects/<SRC>/ that has already been
+Input: a source slice under data/raw/crops/<SRC>/ that has already been
 scored by score_orientability.py (so <SRC>/orientability.csv exists). We keep the
 crops whose per-crop orient_median <= --max-median and hard-link them into a new
 slice, carrying the manifest metadata (image_id, category) unchanged.
@@ -31,7 +31,7 @@ import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"
+CROPS_BASE = ROOT / "data" / "raw" / "crops"
 
 
 def link_or_copy(src: Path, dst: Path) -> None:
@@ -68,7 +68,7 @@ def out_slice_name(params: dict) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--crops", required=True, help="source crop-slice subdir under data/raw/coco_objects/")
+    ap.add_argument("--crops", required=True, help="source crop-slice subdir under data/raw/crops/")
     ap.add_argument(
         "--max-median",
         type=float,

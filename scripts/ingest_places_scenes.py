@@ -15,7 +15,7 @@ shards are read directly with pyarrow (rows embed image bytes, so HF streaming i
 ~1000x slower), and --skip/--sample-size slice by shard/row exactly like the COCO tool:
 [0,10000) to train a disposable filter model, [10000,15000) to then score+filter with it.
 
-Output: data/raw/coco_objects/places_<...>_cfg=<hash>/ with the scene images, a manifest
+Output: data/raw/crops/places_<...>_cfg=<hash>/ with the scene images, a manifest
 (filename, image_id, category) and crop_config.json. The base dir is shared with COCO on
 purpose (it is the training-crop store); the places_ prefix keeps the slice recognizable.
 
@@ -39,7 +39,7 @@ from tqdm import tqdm
 from rotcaptcha.geometry import center_square
 
 ROOT = Path(__file__).resolve().parents[1]
-CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"  # shared training-crop store
+CROPS_BASE = ROOT / "data" / "raw" / "crops"  # shared training-crop store
 
 DATASET = "ljnlonoljpiljm/places365-256px"
 # Pin a revision so the derived slices are reproducible.

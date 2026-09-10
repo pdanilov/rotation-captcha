@@ -17,12 +17,12 @@ Note on the source schema (differs from native COCO):
 - category is a contiguous 0..79 index; names live in the dataset feature.
 - there is no `iscrowd` flag, so crowd regions are not filtered.
 
-Output: square object crops in data/raw/coco_objects/<SPLIT_NAME>/, resized to
+Output: square object crops in data/raw/crops/<SPLIT_NAME>/, resized to
 --out-size, plus a manifest (filename, image_id, category) that build_hf_dataset.py
 reads for the grouped-by-image split and metadata, without re-reading annotations.
-<SPLIT_NAME> encodes the slice plus a hash of all crop params (min-side, cap,
-exclude, ...): 'val_cfg=ab12cd', 'train_size=15000_cfg=...',
-'train_from=5000_size=5000_cfg=...'. Different params never collide; identical
+<SPLIT_NAME> is a 'coco_' prefix + the slice + a hash of all crop params (min-side,
+cap, exclude, ...): 'coco_val_cfg=ab12cd', 'coco_train_size=15000_cfg=...',
+'coco_train_from=5000_size=5000_cfg=...'. Different params never collide; identical
 params reuse the same dir. The full params are also written to crop_config.json.
 
     python scripts/crop_coco_objects.py --split val --min-side 64 --max-per-category 1500
@@ -93,7 +93,7 @@ def parse_exclude(arg: str | None) -> set[str]:
     return {c.strip() for c in arg.split(",") if c.strip()}
 
 
-CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"
+CROPS_BASE = ROOT / "data" / "raw" / "crops"
 
 
 def crop_params(args: argparse.Namespace, exclude: set[str]) -> dict:
@@ -115,12 +115,15 @@ def crop_params(args: argparse.Namespace, exclude: set[str]) -> dict:
 
 
 def split_dir_name(params: dict) -> str:
-    """Output subdir name: readable slice (split/skip/sample_size) + a deterministic
-    hash of all content-defining params, so different params never collide while
-    identical params reuse the same dir. E.g. 'train_size=5000_cfg=a3f9c1',
-    'train_from=5000_size=5000_cfg=...'.
+    """Output subdir name: a 'coco_' source prefix + readable slice
+    (split/skip/sample_size) + a deterministic hash of all content-defining params,
+    so different params never collide while identical params reuse the same dir. The
+    prefix keeps COCO slices distinguishable from places_/mix_ slices in the shared
+    crops/ store. E.g. 'coco_train_size=5000_cfg=a3f9c1',
+    'coco_train_from=5000_size=5000_cfg=...'. The hash is over params only, so the
+    prefix does not change it (regenerating reproduces the same cfg=).
     """
-    name = params["split"]
+    name = f"coco_{params['split']}"
     if params["skip"]:
         name += f"_from={params['skip']}"
     if params["sample_size"] is not None:

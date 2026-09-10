@@ -10,8 +10,8 @@ This is the model-based orientability "thermometer" as a proper tool. Use a filt
 model trained on a DISJOINT slice (no leakage): it scores crops it never trained on.
 
 Writes, next to the slice:
-  data/raw/coco_objects/<SLICE>/orientability.csv      (filename, orient_median, orient_mae)
-  data/raw/coco_objects/<SLICE>/orientability.json     (provenance: checkpoint, n_angles, ...)
+  data/raw/crops/<SLICE>/orientability.csv      (filename, orient_median, orient_mae)
+  data/raw/crops/<SLICE>/orientability.json     (provenance: checkpoint, n_angles, ...)
 
     python scripts/score_orientability.py --crops train_from=10000_size=5000_cfg=6be7bb \
         --checkpoint runs/cls-72b-aug__.../model.pt
@@ -38,7 +38,7 @@ from rotcaptcha.metrics import circular_abs_error
 from rotcaptcha.model import build_model
 
 ROOT = Path(__file__).resolve().parents[1]
-CROPS_BASE = ROOT / "data" / "raw" / "coco_objects"
+CROPS_BASE = ROOT / "data" / "raw" / "crops"
 
 
 class DiscAngleDataset(Dataset):
@@ -70,7 +70,7 @@ def infer_n_bins(state_dict: dict) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--crops", required=True, help="crop-slice subdir under data/raw/coco_objects/ to score")
+    ap.add_argument("--crops", required=True, help="crop-slice subdir under data/raw/crops/ to score")
     ap.add_argument("--checkpoint", required=True, type=Path, help="filter-model state_dict (.pt)")
     ap.add_argument("--model-name", default="microsoft/resnet-34")
     ap.add_argument("--n-angles", type=int, default=12, help="rotations per crop (evenly spaced over 360)")

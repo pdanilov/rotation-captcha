@@ -6,7 +6,7 @@ column + extra metadata), loadable directly with:
     load_dataset("imagefolder", data_dir="data/hf/<name>")
 
 Produced datasets (hf/ mirrors the raw/ layout, incl. the crop slice name):
-  data/hf/coco_objects/<SLICE>/{train,validation}/         metadata: file_name, image_id, category
+  data/hf/crops/<SLICE>/{train,validation}/         metadata: file_name, image_id, category
   data/hf/captcha/baidu/labeled_caps/test/                 metadata: file_name, angle_cw
   data/hf/captcha/baidu/unlabeled_caps/{train,validation}/ metadata: file_name
 
@@ -37,7 +37,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-COCO_BASE = ROOT / "data" / "raw" / "coco_objects"  # holds per-slice subdirs
+COCO_BASE = ROOT / "data" / "raw" / "crops"  # holds per-slice subdirs
 REAL = ROOT / "data" / "raw" / "captcha" / "baidu" / "labeled_caps"
 REAL_CSV = REAL / "labels.csv"
 REAL_UNL = ROOT / "data" / "raw" / "captcha" / "baidu" / "unlabeled_caps"
@@ -104,10 +104,10 @@ def build_coco(crops_dir: Path, val_frac: float, seed: int, group_by_image: bool
 
     slice_name = crops_dir.name
     cols = ["file_name", "image_id", "category"]
-    write_split(HF / "coco_objects" / slice_name / "train", to_rows(train), cols)
-    write_split(HF / "coco_objects" / slice_name / "validation", to_rows(val), cols)
+    write_split(HF / "crops" / slice_name / "train", to_rows(train), cols)
+    write_split(HF / "crops" / slice_name / "validation", to_rows(val), cols)
     mode = "grouped-by-image" if group_by_image else "crop-level"
-    print(f"coco_objects/{slice_name}: train={len(train)} val={len(val)} ({mode} split)")
+    print(f"crops/{slice_name}: train={len(train)} val={len(val)} ({mode} split)")
 
 
 def build_real_labeled() -> None:
@@ -144,7 +144,7 @@ def main() -> None:
     ap.add_argument(
         "--crops",
         default=None,
-        help="crop-slice subdir under data/raw/coco_objects/ to export (e.g. 'val', "
+        help="crop-slice subdir under data/raw/crops/ to export (e.g. 'val', "
         "'train_from=5000_size=5000'). Omit to build only the captcha datasets.",
     )
     ap.add_argument("--no-captcha", action="store_true", help="skip rebuilding the captcha datasets")
@@ -169,7 +169,7 @@ def main() -> None:
 
     print(f"\nHF datasets under {HF}/ . Load e.g.:")
     if args.crops:
-        print(f'  load_dataset("imagefolder", data_dir="data/hf/coco_objects/{args.crops}")')
+        print(f'  load_dataset("imagefolder", data_dir="data/hf/crops/{args.crops}")')
     print('  load_dataset("imagefolder", data_dir="data/hf/captcha/baidu/labeled_caps")')
 
 
