@@ -117,10 +117,10 @@ def main() -> None:
     ap.add_argument("--min-side", type=int, default=64, help="skip images smaller than this on any side")
     ap.add_argument("--out-size", type=int, default=256, help="resize each square scene to this size (px)")
     ap.add_argument("--limit", type=int, default=None, help="max total scenes")
-    ap.add_argument("--skip", type=int, default=0, help="offset into the shuffled order (for a disjoint held-out window)")
     ap.add_argument(
-        "--sample-size", type=int, default=None, help="take N images from the shuffled order after --skip"
+        "--skip", type=int, default=0, help="offset into the shuffled order (for a disjoint held-out window)"
     )
+    ap.add_argument("--sample-size", type=int, default=None, help="take N images from the shuffled order after --skip")
     ap.add_argument("--seed", type=int, default=0, help="global-shuffle seed (baked into the slice hash)")
     args = ap.parse_args()
 
