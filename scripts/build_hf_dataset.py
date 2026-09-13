@@ -5,10 +5,14 @@ column + extra metadata), loadable directly with:
 
     load_dataset("imagefolder", data_dir="data/hf/<name>")
 
-Produced datasets (hf/ mirrors the raw/ layout):
-  data/hf/coco_objects/{train,validation}/            metadata: file_name, image_id, category
+Produced datasets (hf/ mirrors the raw/ layout, incl. the crop slice name):
+  data/hf/crops/<SLICE>/{train,validation}/         metadata: file_name, image_id, category
   data/hf/captcha/baidu/labeled_caps/test/                 metadata: file_name, angle_cw
   data/hf/captcha/baidu/unlabeled_caps/{train,validation}/ metadata: file_name
+
+<SLICE> is the crop-slice subdir produced by crop_coco_objects.py (e.g.
+'val_cfg=ab12cd', 'train_from=5000_size=5000_cfg=...'); pass it with --crops
+(copy the exact name it printed).
 
 The COCO train/val split is grouped by source `image_id` (all crops from one photo
 go to the same split) to prevent scene/background leakage — which is exactly why
@@ -17,6 +21,9 @@ split crops individually instead.
 
 Images are hard-linked into the split folders when possible (no extra disk), with
 a copy fallback across filesystems.
+
+    python scripts/build_hf_dataset.py --crops train_from=5000_size=5000
+    python scripts/build_hf_dataset.py --crops val --no-captcha
 """
 
 from __future__ import annotations
@@ -30,8 +37,7 @@ from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CROPS = ROOT / "data" / "raw" / "coco_objects"
-CROP_MANIFEST = CROPS / "manifest.csv"
+COCO_BASE = ROOT / "data" / "raw" / "crops"  # holds per-slice subdirs
 REAL = ROOT / "data" / "raw" / "captcha" / "baidu" / "labeled_caps"
 REAL_CSV = REAL / "labels.csv"
 REAL_UNL = ROOT / "data" / "raw" / "captcha" / "baidu" / "unlabeled_caps"
@@ -62,11 +68,12 @@ def write_split(dst_dir: Path, rows: list[dict], columns: list[str]) -> None:
             w.writerow([r[c] for c in columns])
 
 
-def build_coco(val_frac: float, seed: int, group_by_image: bool) -> None:
-    if not CROP_MANIFEST.exists():
-        raise SystemExit(f"Missing {CROP_MANIFEST}; run crop_coco_objects.py first.")
-    with CROP_MANIFEST.open(newline="") as f:
-        recs = [r for r in csv.DictReader(f) if (CROPS / r["filename"]).exists()]
+def build_coco(crops_dir: Path, val_frac: float, seed: int, group_by_image: bool) -> None:
+    manifest = crops_dir / "manifest.csv"
+    if not manifest.exists():
+        raise SystemExit(f"Missing {manifest}; run crop_coco_objects.py --split ... first.")
+    with manifest.open(newline="") as f:
+        recs = [r for r in csv.DictReader(f) if (crops_dir / r["filename"]).exists()]
 
     rng = random.Random(seed)
     if group_by_image:
@@ -87,7 +94,7 @@ def build_coco(val_frac: float, seed: int, group_by_image: bool) -> None:
     def to_rows(rs: list[dict]) -> list[dict]:
         return [
             {
-                "src": CROPS / r["filename"],
+                "src": crops_dir / r["filename"],
                 "file_name": r["filename"],
                 "image_id": r["image_id"],
                 "category": r["category"],
@@ -95,14 +102,21 @@ def build_coco(val_frac: float, seed: int, group_by_image: bool) -> None:
             for r in rs
         ]
 
+    slice_name = crops_dir.name
     cols = ["file_name", "image_id", "category"]
-    write_split(HF / "coco_objects" / "train", to_rows(train), cols)
-    write_split(HF / "coco_objects" / "validation", to_rows(val), cols)
+    write_split(HF / "crops" / slice_name / "train", to_rows(train), cols)
+    write_split(HF / "crops" / slice_name / "validation", to_rows(val), cols)
     mode = "grouped-by-image" if group_by_image else "crop-level"
-    print(f"coco_objects: train={len(train)} val={len(val)} ({mode} split)")
+    print(f"crops/{slice_name}: train={len(train)} val={len(val)} ({mode} split)")
 
 
-def build_real_labeled() -> None:
+def build_real_labeled(val_n: int, seed: int) -> None:
+    """Split the labeled caps into a `val` monitor set and a `test` report set.
+
+    `val` (default 50) is a leakage-free early-stop / threshold-tuning monitor;
+    `test` (the rest, ~150) is the reported metric and is NEVER used for selection.
+    The split is a fixed-seed shuffle so it is stable across rebuilds.
+    """
     if not REAL_CSV.exists():
         raise SystemExit(f"Missing {REAL_CSV}; run fetch_real_caps.py first.")
     with REAL_CSV.open(newline="") as f:
@@ -110,8 +124,13 @@ def build_real_labeled() -> None:
             {"src": REAL / r["filename"], "file_name": r["filename"], "angle_cw": r["angle_cw"]}
             for r in csv.DictReader(f)
         ]
-    write_split(HF / "captcha" / "baidu" / "labeled_caps" / "test", rows, ["file_name", "angle_cw"])
-    print(f"captcha/baidu/labeled_caps: test={len(rows)}")
+    random.Random(seed).shuffle(rows)
+    val_n = min(val_n, len(rows) - 1)
+    val, test = rows[:val_n], rows[val_n:]
+    base = HF / "captcha" / "baidu" / "labeled_caps"
+    write_split(base / "val", val, ["file_name", "angle_cw"])
+    write_split(base / "test", test, ["file_name", "angle_cw"])
+    print(f"captcha/baidu/labeled_caps: val={len(val)} test={len(test)} (fixed seed={seed})")
 
 
 def build_real_unlabeled(val_frac: float, seed: int) -> None:
@@ -133,18 +152,41 @@ def build_real_unlabeled(val_frac: float, seed: int) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--crops",
+        default=None,
+        help="crop-slice subdir under data/raw/crops/ to export (e.g. 'val', "
+        "'train_from=5000_size=5000'). Omit to build only the captcha datasets.",
+    )
+    ap.add_argument("--no-captcha", action="store_true", help="skip rebuilding the captcha datasets")
     ap.add_argument("--val-frac", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--labeled-val-n",
+        type=int,
+        default=50,
+        help="how many labeled caps go to the val (early-stop/tuning) split; the rest are test",
+    )
     ap.add_argument(
         "--crop-level-split", action="store_true", help="split COCO crops individually instead of grouping by image"
     )
     args = ap.parse_args()
 
-    build_coco(args.val_frac, args.seed, group_by_image=not args.crop_level_split)
-    build_real_labeled()
-    build_real_unlabeled(args.val_frac, args.seed)
+    if not args.crops and args.no_captcha:
+        raise SystemExit("Nothing to build: pass --crops <SLICE> and/or drop --no-captcha.")
+
+    if args.crops:
+        crops_dir = COCO_BASE / args.crops
+        if not crops_dir.is_dir():
+            raise SystemExit(f"No such crop slice: {crops_dir}")
+        build_coco(crops_dir, args.val_frac, args.seed, group_by_image=not args.crop_level_split)
+    if not args.no_captcha:
+        build_real_labeled(args.labeled_val_n, args.seed)
+        build_real_unlabeled(args.val_frac, args.seed)
+
     print(f"\nHF datasets under {HF}/ . Load e.g.:")
-    print('  load_dataset("imagefolder", data_dir="data/hf/coco_objects")')
+    if args.crops:
+        print(f'  load_dataset("imagefolder", data_dir="data/hf/crops/{args.crops}")')
     print('  load_dataset("imagefolder", data_dir="data/hf/captcha/baidu/labeled_caps")')
 
 

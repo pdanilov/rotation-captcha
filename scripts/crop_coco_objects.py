@@ -1,5 +1,7 @@
 """Crop object-centered squares from COCO using the HF `detection-datasets/coco`
-dataset (images + boxes in one place — no zip/annotation downloads).
+dataset (images + boxes in one place — no zip/annotation downloads). Its parquet
+shards are read directly with pyarrow (HF streaming is ~1000x slower here because
+every row embeds the image bytes), so --skip/--sample-size slice by shard/row.
 
 Rationale: real rotation captchas show a single recognizable object, upright.
 Arbitrary full scenes make a poor synthetic proxy, so instead of rotating whole
@@ -15,18 +17,28 @@ Note on the source schema (differs from native COCO):
 - category is a contiguous 0..79 index; names live in the dataset feature.
 - there is no `iscrowd` flag, so crowd regions are not filtered.
 
-Output: square object crops in data/raw/coco_objects/, resized to --out-size,
-plus a manifest (filename, image_id, category) that build_hf_dataset.py reads for
-the grouped-by-image split and metadata, without re-reading any annotations.
+Output: square object crops in data/raw/crops/<SPLIT_NAME>/, resized to
+--out-size, plus a manifest (filename, image_id, category) that build_hf_dataset.py
+reads for the grouped-by-image split and metadata, without re-reading annotations.
+<SPLIT_NAME> is a 'coco_' prefix + the slice + a hash of all crop params (min-side,
+cap, exclude, ...): 'coco_val_cfg=ab12cd', 'coco_train_size=15000_cfg=...',
+'coco_train_from=5000_size=5000_cfg=...'. Different params never collide; identical
+params reuse the same dir. The full params are also written to crop_config.json.
 
     python scripts/crop_coco_objects.py --split val --min-side 64 --max-per-category 1500
+    python scripts/crop_coco_objects.py --split train --sample-size 5000 --exclude-categories none
+    python scripts/crop_coco_objects.py --split train --skip 5000 --sample-size 5000  # held-out
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import io
+import json
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 
 from PIL import Image
@@ -81,8 +93,44 @@ def parse_exclude(arg: str | None) -> set[str]:
     return {c.strip() for c in arg.split(",") if c.strip()}
 
 
-OUT = ROOT / "data" / "raw" / "coco_objects"
-MANIFEST = OUT / "manifest.csv"
+CROPS_BASE = ROOT / "data" / "raw" / "crops"
+
+
+def crop_params(args: argparse.Namespace, exclude: set[str]) -> dict:
+    """Canonical, content-defining parameters of a crop run (no result counts).
+    Used both for the dir-name hash and the crop_config.json record."""
+    return {
+        "dataset": DATASET,
+        "revision": REVISION,
+        "split": args.split,
+        "skip": args.skip,
+        "sample_size": args.sample_size,
+        "min_side": args.min_side,
+        "out_size": args.out_size,
+        "max_per_image": args.max_per_image,
+        "max_per_category": args.max_per_category,
+        "limit": args.limit,
+        "exclude_categories": sorted(exclude),
+    }
+
+
+def split_dir_name(params: dict) -> str:
+    """Output subdir name: a 'coco_' source prefix + readable slice
+    (split/skip/sample_size) + a deterministic hash of all content-defining params,
+    so different params never collide while identical params reuse the same dir. The
+    prefix keeps COCO slices distinguishable from places_/mix_ slices in the shared
+    crops/ store. E.g. 'coco_train_size=5000_cfg=a3f9c1',
+    'coco_train_from=5000_size=5000_cfg=...'. The hash is over params only, so the
+    prefix does not change it (regenerating reproduces the same cfg=).
+    """
+    name = f"coco_{params['split']}"
+    if params["skip"]:
+        name += f"_from={params['skip']}"
+    if params["sample_size"] is not None:
+        name += f"_size={params['sample_size']}"
+    digest = hashlib.sha1(json.dumps(params, sort_keys=True).encode()).hexdigest()[:6]
+    return f"{name}_cfg={digest}"
+
 
 DATASET = "detection-datasets/coco"
 # Pin a revision so the derived crops are reproducible (third-party re-host).
@@ -96,6 +144,42 @@ def square_crop_box(x, y, w, h, img_w, img_h):
     left = min(max(cx - side / 2.0, 0.0), img_w - side)
     top = min(max(cy - side / 2.0, 0.0), img_h - side)
     return (round(left), round(top), round(left + side), round(top + side))
+
+
+def iter_coco_rows(split: str, skip: int, sample_size: int | None) -> Iterator[dict]:
+    """Yield COCO rows [skip, skip+sample_size) by reading the cached parquet shards
+    directly with pyarrow.
+
+    HF streaming is ~1000x slower here (each row embeds image bytes: ~12 s/img vs
+    ~90 img/s for pyarrow), so we bypass it. Whole shards before `skip` are skipped
+    without reading. Each row is a dict with image_id/width/height/objects and an
+    `image` struct carrying the JPEG `bytes`.
+    """
+    import pyarrow.parquet as pq
+    from huggingface_hub import snapshot_download
+
+    local = snapshot_download(
+        DATASET, repo_type="dataset", revision=REVISION, allow_patterns=[f"data/{split}-*.parquet"]
+    )
+    shards = sorted(Path(local).glob(f"data/{split}-*.parquet"))
+    cols = ["image_id", "width", "height", "objects", "image"]
+    seen = yielded = 0
+    for shard in shards:
+        pf = pq.ParquetFile(shard)
+        nrows = pf.metadata.num_rows
+        if seen + nrows <= skip:  # whole shard is before the window — skip without reading
+            seen += nrows
+            continue
+        for batch in pf.iter_batches(batch_size=64, columns=cols):
+            for row in batch.to_pylist():
+                if seen < skip:
+                    seen += 1
+                    continue
+                if sample_size is not None and yielded >= sample_size:
+                    return
+                seen += 1
+                yielded += 1
+                yield row
 
 
 def main() -> None:
@@ -122,42 +206,58 @@ def main() -> None:
     )
     ap.add_argument("--limit", type=int, default=None, help="max total crops")
     ap.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="skip the first M base images. Independent of --sample-size: with it alone "
+        "you crop the tail [M, end); with --sample-size you crop [M, M+N). Whole shards "
+        "before M are skipped without reading.",
+    )
+    ap.add_argument(
+        "--sample-size",
+        type=int,
+        default=None,
+        help="take N base images (after any --skip), in dataset order, instead of the "
+        "whole split — reads only the shards needed. Shard order is category-unbiased "
+        "(verified: one shard spans all 80 categories), so no shuffle is needed: [0,N) "
+        "and [N,2N) are already disjoint, reproducible, and each representative (e.g. "
+        "[0,5000) to train a filter model, [5000,10000) to then crop+filter with it).",
+    )
+    ap.add_argument(
         "--exclude-categories",
         default=None,
         help="comma-separated category names to skip (rotationally "
         "ambiguous). Default: the moderate blocklist "
         f"({len(AMBIGUOUS_CATEGORIES)} cats). Use 'none' to keep all.",
     )
-    ap.add_argument(
-        "--streaming",
-        action="store_true",
-        help="stream the dataset instead of downloading it fully",
-    )
     args = ap.parse_args()
 
-    from datasets import load_dataset  # heavy import; keep it local
+    from datasets import load_dataset_builder  # heavy import; keep it local
 
     exclude = parse_exclude(args.exclude_categories)
     if exclude:
         print(f"Excluding {len(exclude)} ambiguous categories: {', '.join(sorted(exclude))}")
 
-    print(f"Loading {DATASET} (split={args.split}, rev={REVISION[:7]}) ...")
-    ds = load_dataset(DATASET, split=args.split, revision=REVISION, streaming=args.streaming)
-
-    # category index -> name, from the dataset's own feature definition.
+    # category index -> name, from the builder metadata (pure metadata, no data read).
     # objects is a dict of List(...) features; category is List(ClassLabel).
-    feat = ds.features
-    if feat is None:  # can be unresolved for streaming datasets
-        feat = ds._resolve_features().features
-    cat_names = feat["objects"]["category"].feature.names
+    builder = load_dataset_builder(DATASET, revision=REVISION)
+    cat_names = builder.info.features["objects"]["category"].feature.names
     exclude_idx = {i for i, n in enumerate(cat_names) if n in exclude}
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    hi = args.skip + args.sample_size if args.sample_size is not None else "end"
+    print(f"Reading {DATASET} {args.split} images [{args.skip}, {hi}) via pyarrow (rev={REVISION[:7]}) ...")
+    ds = iter_coco_rows(args.split, args.skip, args.sample_size)
+
+    params = crop_params(args, exclude)
+    out_dir = CROPS_BASE / split_dir_name(params)
+    manifest = out_dir / "manifest.csv"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output -> {out_dir}")
     per_cat: dict[int, int] = defaultdict(int)
     per_img: dict[int, int] = defaultdict(int)
     n_written = n_skip_small = n_skip_ambig = n_skip_broken = 0
 
-    with MANIFEST.open("w", newline="") as mf:
+    with manifest.open("w", newline="") as mf:
         writer = csv.writer(mf)
         writer.writerow(["filename", "image_id", "category"])
 
@@ -185,7 +285,7 @@ def main() -> None:
 
                 if image is None:
                     try:
-                        image = row["image"].convert("RGB")
+                        image = Image.open(io.BytesIO(row["image"]["bytes"])).convert("RGB")
                     except Exception:
                         n_skip_broken += 1
                         break
@@ -194,14 +294,26 @@ def main() -> None:
                 if args.out_size:
                     crop = crop.resize((args.out_size, args.out_size), Image.Resampling.BICUBIC)
                 name = f"{image_id:012d}_{bbox_id}.jpg"
-                crop.save(OUT / name, quality=92)
+                crop.save(out_dir / name, quality=92)
                 writer.writerow([name, image_id, cat_names[cat]])
                 per_cat[cat] += 1
                 per_img[image_id] += 1
                 n_written += 1
 
-    print(f"\nWrote {n_written} crops -> {OUT}")
-    print(f"  manifest -> {MANIFEST}")
+    # Provenance: full run parameters + counts, so the crop slice is self-describing
+    # (the dir name only carries split/skip/sample_size). Its name is the key that
+    # training logs via config.coco_slice; this file records the rest.
+    record = {
+        **params,
+        "n_crops": n_written,
+        "n_skip_small": n_skip_small,
+        "n_skip_ambiguous_category": n_skip_ambig,
+        "n_skip_broken": n_skip_broken,
+    }
+    (out_dir / "crop_config.json").write_text(json.dumps(record, indent=2))
+    print(f"\nWrote {n_written} crops -> {out_dir}")
+    print(f"  manifest -> {manifest}")
+    print(f"  config   -> {out_dir / 'crop_config.json'}")
     print(f"  skipped: {n_skip_small} too-small, {n_skip_ambig} ambiguous-category, {n_skip_broken} broken image")
 
 
